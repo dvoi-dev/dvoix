@@ -5,6 +5,7 @@
   import { onMount, untrack } from "svelte";
   import { Crosshair, ExternalLink, Maximize, Pause, Play, RotateCcw, SlidersHorizontal, X, ZoomIn, ZoomOut } from "@lucide/svelte";
   import { api, type GraphData } from "../../../api";
+  import { settings as appSettings } from "../../../settings.svelte";
   import { vault } from "../../../vault.svelte";
   import GraphOptions from "./GraphOptions.svelte";
   import {
@@ -611,6 +612,19 @@
     };
   });
 
+  $effect(() => {
+    void [appSettings.appearance.theme, appSettings.appearance.accentColor];
+    const id = requestAnimationFrame(() => {
+      alphaColors.clear();
+      labelWidths.clear();
+      colors = readColors();
+      redraw();
+    });
+    return () => cancelAnimationFrame(id);
+  });
+
+  // Reload when files change on disk: once per burst of changes, and only
+  // one load at a time (a load that was superseded waits for the next one).
   let loadingData = false;
   let dataAgain = false;
   function loadData() {
