@@ -6,15 +6,17 @@
 //! window (on Windows it stays white until the work is done).
 
 use dvoix_core::{
-    GraphData, HiddenFilter, NoteSummary, RenderedNote, SearchHit, TaskItem, VaultEntry,
-    index::TagCount, markdown, tasks,
+    GraphData, HiddenFilter, NoteSummary, RenderedNote, SearchHit, TaskItem, TrashedEntry,
+    VaultEntry, index::TagCount, markdown, tasks,
 };
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use crate::{AppState, VaultHandle, Workspace, http, settings};
 
-use dvoix_core::store::{self, InstalledPlugin, PluginFiles, PluginManifest, RegistryEntry};
+use dvoix_core::store::{
+    self, InstalledPlugin, PluginFiles, PluginManifest, RegistryEntry, ReleaseNote,
+};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -209,11 +211,62 @@ pub fn rename_entry(state: State<AppState>, from: String, to: String) -> CmdResu
 }
 
 #[tauri::command(async)]
-pub fn trash_entry(state: State<AppState>, path: String) -> CmdResult<()> {
+pub fn trash_entry(state: State<AppState>, path: String) -> CmdResult<TrashedEntry> {
     with_ws(&state, |ws| {
-        ws.vault.trash(&path).map_err(err)?;
-        ws.index.lock().map_err(err)?.remove(&path).map_err(err)
+        let trashed = ws.vault.trash(&path).map_err(err)?;
+        ws.index.lock().map_err(err)?.remove(&path).map_err(err)?;
+        Ok(trashed)
     })
+}
+
+#[tauri::command(async)]
+pub fn list_trash(state: State<AppState>) -> CmdResult<Vec<TrashedEntry>> {
+    with_ws(&state, |ws| ws.vault.list_trash().map_err(err))
+}
+
+#[tauri::command(async)]
+pub fn restore_trash_entry(
+    state: State<AppState>,
+    name: String,
+    target: Option<String>,
+    rename_on_conflict: Option<bool>,
+) -> CmdResult<VaultEntry> {
+    with_ws(&state, |ws| {
+        let entry = ws
+            .vault
+            .restore_from_trash(
+                &name,
+                target.as_deref(),
+                rename_on_conflict.unwrap_or(false),
+            )
+            .map_err(err)?;
+        if entry.is_dir {
+            let from = format!("{}/{}", dvoix_core::vault::TRASH_DIR, name);
+            ws.index
+                .lock()
+                .map_err(err)?
+                .move_folder(&ws.vault, &from, &entry.path)
+                .map_err(err)?;
+        } else {
+            reindex(ws, &entry.path)?;
+        }
+        Ok(entry)
+    })
+}
+
+#[tauri::command(async)]
+pub fn delete_trash_entry(state: State<AppState>, name: String) -> CmdResult<()> {
+    with_ws(&state, |ws| ws.vault.delete_trashed(&name).map_err(err))
+}
+
+#[tauri::command(async)]
+pub fn empty_trash(state: State<AppState>) -> CmdResult<()> {
+    with_ws(&state, |ws| ws.vault.empty_trash().map_err(err))
+}
+
+#[tauri::command(async)]
+pub fn list_snippets(state: State<AppState>) -> CmdResult<Vec<String>> {
+    with_ws(&state, |ws| ws.vault.list_snippets().map_err(err))
 }
 
 #[tauri::command(async)]
@@ -271,6 +324,19 @@ pub fn backlinks(state: State<AppState>, path: String) -> CmdResult<Vec<NoteSumm
 pub fn graph(state: State<AppState>) -> CmdResult<GraphData> {
     with_ws(&state, |ws| {
         ws.index.lock().map_err(err)?.graph().map_err(err)
+    })
+}
+
+/// The graph data of only these notes, so the graph view can patch its copy
+/// after a change instead of reading the whole vault (see `Index::graph_notes`).
+#[tauri::command(async)]
+pub fn graph_notes(state: State<AppState>, paths: Vec<String>) -> CmdResult<GraphData> {
+    with_ws(&state, |ws| {
+        ws.index
+            .lock()
+            .map_err(err)?
+            .graph_notes(&paths)
+            .map_err(err)
     })
 }
 
@@ -337,54 +403,72 @@ pub fn store_registry() -> CmdResult<Vec<RegistryEntry>> {
     store::parse_registry(&text).map_err(err)
 }
 
-/// The manifest of the newest release of a plugin, to show its version,
-/// permissions and whether an update is there.
+/// The manifest of the release the plugin list pins, to show its version,
+/// permissions and the dvoix version it needs. Checked against the list's
+/// checksum like an install.
 #[tauri::command(async)]
-pub fn store_latest_manifest(repo: String) -> CmdResult<PluginManifest> {
-    fetch_manifest(&repo).map(|(m, _)| m)
+pub fn store_manifest(entry: RegistryEntry) -> CmdResult<PluginManifest> {
+    store::check_entry(&entry).map_err(err)?;
+    let text = fetch_release_file(&entry, store::MANIFEST_FILE)?
+        .ok_or_else(|| missing(&entry, store::MANIFEST_FILE))?;
+    store::verified_manifest(&entry, &text).map_err(err)
 }
 
-fn fetch_manifest(repo: &str) -> CmdResult<(PluginManifest, String)> {
-    let url = store::latest_manifest_url(repo).map_err(err)?;
-    let text = http::get_text(&url)?
-        .ok_or_else(|| format!("{repo} has no release with a manifest.json"))?;
-    let manifest = store::parse_manifest(&text).map_err(err)?;
-    Ok((manifest, text))
+/// The release notes of a plugin's newest releases, for the changelog.
+#[tauri::command(async)]
+pub fn store_changelog(repo: String) -> CmdResult<Vec<ReleaseNote>> {
+    let url = store::releases_url(&repo).map_err(err)?;
+    let text = http::get_text(&url)?.ok_or_else(|| format!("{repo} has no releases"))?;
+    store::parse_releases(&text).map_err(err)
 }
 
-/// Installs or updates a plugin from the newest release of `repo`. The files
-/// come from the release tagged with the manifest's version, so all three
-/// belong to the same release.
+fn fetch_release_file(entry: &RegistryEntry, file: &str) -> CmdResult<Option<String>> {
+    let url = store::release_url(&entry.repo, &entry.version, file).map_err(err)?;
+    http::get_text(&url)
+}
+
+fn missing(entry: &RegistryEntry, file: &str) -> String {
+    format!(
+        "Release {} of {} is missing {file}",
+        entry.version, entry.repo
+    )
+}
+
+/// Installs or updates a plugin from the release its registry entry pins.
+/// Every file is checked against the entry's SHA-256 before anything is
+/// written; `styles.css` is only fetched when the entry lists it.
 #[tauri::command(async)]
-pub fn store_install(
-    state: State<AppState>,
-    repo: String,
-    id: String,
-) -> CmdResult<PluginManifest> {
-    let (manifest, manifest_text) = fetch_manifest(&repo)?;
-    let main_url = store::release_url(&repo, &manifest.version, store::MAIN_FILE).map_err(err)?;
-    let styles_url =
-        store::release_url(&repo, &manifest.version, store::STYLES_FILE).map_err(err)?;
-    // The two files do not depend on each other: fetch them at the same
-    // time, so an install waits one download instead of two.
-    let (main, styles) = std::thread::scope(|scope| {
-        let main = scope.spawn(|| http::get_text(&main_url));
-        let styles = scope.spawn(|| http::get_text(&styles_url));
-        let main = main.join().map_err(|_| "The download failed".to_string())?;
-        let styles = styles
-            .join()
-            .map_err(|_| "The download failed".to_string())?;
-        CmdResult::Ok((main?, styles?))
+pub fn store_install(state: State<AppState>, entry: RegistryEntry) -> CmdResult<PluginManifest> {
+    store::check_entry(&entry).map_err(err)?;
+    let with_styles = entry.sha256.contains_key(store::STYLES_FILE);
+    // The files do not depend on each other: fetch them at the same time, so
+    // an install waits one download instead of three.
+    let (manifest, main, styles) = std::thread::scope(|scope| {
+        let manifest = scope.spawn(|| fetch_release_file(&entry, store::MANIFEST_FILE));
+        let main = scope.spawn(|| fetch_release_file(&entry, store::MAIN_FILE));
+        let styles = scope.spawn(|| {
+            if with_styles {
+                fetch_release_file(&entry, store::STYLES_FILE)
+            } else {
+                Ok(None)
+            }
+        });
+        let join = |r: std::thread::Result<CmdResult<Option<String>>>| {
+            r.map_err(|_| "The download failed".to_string())?
+        };
+        CmdResult::Ok((
+            join(manifest.join())?,
+            join(main.join())?,
+            join(styles.join())?,
+        ))
     })?;
-    let main =
-        main.ok_or_else(|| format!("Release {} of {repo} is missing main.js", manifest.version))?;
     let files = PluginFiles {
-        manifest: manifest_text,
-        main,
+        manifest: manifest.ok_or_else(|| missing(&entry, store::MANIFEST_FILE))?,
+        main: main.ok_or_else(|| missing(&entry, store::MAIN_FILE))?,
         styles,
     };
     with_ws(&state, |ws| {
-        store::install(&ws.vault, &id, &files).map_err(err)
+        store::install(&ws.vault, &entry, &files).map_err(err)
     })
 }
 

@@ -1,11 +1,15 @@
 // App state for the open vault and the open file, shared by all components.
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { untrack } from "svelte";
 import { api, onVaultChanged, type VaultChange, type VaultEntry, type VaultInfo } from "./api";
+import { appEvents } from "./events";
 import { creatableFileTypes, type FileType } from "./filetypes";
 import { flushConfig } from "./config";
 import { plugins } from "./plugins/manager.svelte";
 import { pluginStore } from "./plugins/store/store.svelte";
 import { settings } from "./settings.svelte";
+import { snippets } from "./snippets.svelte";
+import { toasts } from "./toast.svelte";
 import { ui } from "./ui.svelte";
 
 const SAVE_DELAY_MS = 400;
@@ -73,6 +77,12 @@ export interface ChangeGroup {
    * path alone would miss the note that was not last in the batch.
    */
   paths: string[];
+}
+
+/** One path of a batch of changes on disk and what happened to it. */
+export interface VaultChangeKind {
+  path: string;
+  kind: VaultChange["kind"];
 }
 
 /** True for a note: only notes are indexed, so only they change the panels of notes. */
@@ -156,6 +166,8 @@ class VaultStore {
   });
   /** Moves when the list of the vault changes, so that caches know they are stale. */
   entriesVersion = $state(0);
+  /** Moves whenever `.trash/` changes through in-app trash, restore, or delete operations. */
+  trashVersion = $state(0);
 
   /** The files of the vault by their path, for the lookups of links and of changes. */
   private fileByPath = $derived.by(() => {
@@ -179,10 +191,13 @@ class VaultStore {
   });
 
   /** Called with the paths of every batch of changes, for store plugins (`dvoix.vault.onChange`). */
-  private changeListeners = new Set<(paths: string[]) => void>();
+  private changeListeners = new Set<(paths: string[], changes: VaultChangeKind[]) => void>();
 
-  /** Calls `fn` with the vault-relative paths of every batch of changes; returns the unsubscribe. */
-  onChanges(fn: (paths: string[]) => void): () => void {
+  /**
+   * Calls `fn` with the vault-relative paths of every batch of changes on
+   * disk, and what happened to each; returns the unsubscribe.
+   */
+  onChanges(fn: (paths: string[], changes: VaultChangeKind[]) => void): () => void {
     this.changeListeners.add(fn);
     return () => {
       this.changeListeners.delete(fn);
@@ -194,11 +209,29 @@ class VaultStore {
   private selfWrites: { path: string; size: number; modified: number; at: number }[] = [];
   private unlisten: (() => void) | undefined;
   private unlistenViews: (() => void) | undefined;
+  private stopActiveWatch: (() => void) | undefined;
+  /** What `active-file-change` last said, so it only fires on a real change. */
+  private announced: { path: string | null; view: string | null } | null = null;
   private tearingDown = false;
 
   async init() {
     this.unlisten?.();
     this.unlistenViews?.();
+    this.stopActiveWatch?.();
+    // Every way the active file changes (switching tabs, opening a link,
+    // renaming the open file, closing its tab) ends in `openPath`/`openView`,
+    // so watching those two catches all of them, once per change.
+    this.stopActiveWatch = $effect.root(() => {
+      $effect(() => {
+        if (!this.info || this.tearingDown) return;
+        const next = { path: this.openPath, view: this.openView };
+        untrack(() => {
+          if (this.announced && next.path === this.announced.path && next.view === this.announced.view) return;
+          this.announced = next;
+          appEvents.emit("active-file-change", next);
+        });
+      });
+    });
     this.unlistenViews = plugins.onViewRemoved((id) => {
       // When the whole vault closes, its tabs are dropped anyway (and saved before).
       if (!this.tearingDown) void this.closeTabsWhere((t) => t.view === id);
@@ -218,7 +251,8 @@ class VaultStore {
       await this.teardown();
       const info = await api.openVault(path);
       // Settings, workspace and plugins of this vault, all from `<vault>/.dvoix/`.
-      await Promise.all([settings.load(), ui.load(info.path)]);
+      await Promise.all([settings.load(), ui.load(info.path), this.refresh()]);
+      await snippets.refresh();
       this.tabs = [];
       this.activeTabId = 0;
       this.split = null;
@@ -228,8 +262,6 @@ class VaultStore {
       await plugins.loadVault();
       await pluginStore.loadVault();
       this.info = info;
-      // The tabs need the list of the vault to drop vanished files: list first.
-      await this.refresh();
       await this.restoreTabs();
     } catch (e) {
       this.error = String(e);
@@ -253,6 +285,8 @@ class VaultStore {
       throw new Error(this.error);
     }
     ui.unload(); // stop saving the workspace: unloading plugins (e.g. tabs) must not change it
+    snippets.clear();
+    toasts.clear();
     await flushConfig();
     this.tearingDown = true;
     try {
@@ -265,6 +299,7 @@ class VaultStore {
     this.info = null;
     this.entries = [];
     this.entriesVersion++;
+    this.trashVersion++;
     this.tabs = [];
     this.activeTabId = 0;
     this.split = null;
@@ -381,10 +416,11 @@ class VaultStore {
     if (notePaths.length) this.note(this.changes.notes, notePaths);
     if (listAgain) this.scheduleRefresh(lastAdded);
     const paths = [...new Set(changes.map((c) => c.path))];
+    const kinds = changes.map((c) => ({ path: c.path, kind: c.kind }));
     for (const fn of this.changeListeners) {
       // A broken plugin must not stop the app's own panels from updating.
       try {
-        fn(paths);
+        fn(paths, kinds);
       } catch (e) {
         console.error(e);
       }
@@ -1022,6 +1058,7 @@ class VaultStore {
           const entry = await api.writeFile(path, content);
           // Remember our write, so its watcher echo does not read the file back.
           this.noteWritten(entry);
+          appEvents.emit("file-save", { path });
           if (this.buffers[path] === buffer && buffer.revision === revision) {
             buffer.dirty = false;
             buffer.saveState = "saved";
@@ -1070,6 +1107,33 @@ class VaultStore {
     }
   }
 
+  /**
+   * Writes `content` to `path` for a plugin (`dvoix.vault.write`), creating
+   * the file if it does not exist yet.
+   */
+  async writePluginFile(path: string, content: string): Promise<void> {
+    if (!this.entryAt(path)) {
+      try {
+        const entry = await api.createFile(path, content);
+        if (!entry.path.split("/").some((p) => p.startsWith("."))) {
+          this.insertEntry(entry);
+          this.appliedOwnChange([entry.path], isNote(entry.path));
+        }
+        appEvents.emit("file-create", { path: entry.path, isDir: false });
+        return;
+      } catch (e) {
+        if (!String(e).startsWith("path already exists:")) throw e;
+      }
+    }
+    const entry = await api.writeFile(path, content);
+    const found = this.fileByPath.get(entry.path.toLowerCase());
+    if (found) {
+      found.size = entry.size;
+      found.modified = entry.modified;
+      this.entriesVersion++;
+    }
+  }
+
   creatable(): FileType[] {
     return creatableFileTypes();
   }
@@ -1092,6 +1156,7 @@ class VaultStore {
       // the same name again, and the tree works without watcher events.
       this.insertEntry(entry);
       this.appliedOwnChange([path], isNote(path));
+      appEvents.emit("file-create", { path, isDir: false });
       await this.openFile(path, opts);
     } catch (e) {
       this.error = String(e);
@@ -1108,6 +1173,7 @@ class VaultStore {
       // The row exists right away, so the inline rename has something to edit.
       this.insertEntry(entry);
       this.appliedOwnChange([entry.path], true);
+      appEvents.emit("file-create", { path: entry.path, isDir: true });
       if (parent) ui.reveal(`${prefix}${name}`);
       return `${prefix}${name}`;
     } catch (e) {
@@ -1118,24 +1184,35 @@ class VaultStore {
   async rename(from: string, newName: string) {
     const parent = from.includes("/") ? from.slice(0, from.lastIndexOf("/") + 1) : "";
     if (!newName.trim()) return;
-    await this.moveTo(from, `${parent}${newName.trim()}`);
+    await this.moveTo(from, `${parent}${newName.trim()}`, { verb: "rename" });
   }
 
   /** Moves a file or folder into another folder ("" = vault root), e.g. by drag & drop. */
   async move(from: string, folder: string) {
     const name = from.split("/").pop()!;
     if (folder === from || folder.startsWith(`${from}/`)) return; // not into itself
-    await this.moveTo(from, folder ? `${folder}/${name}` : name);
+    const to = folder ? `${folder}/${name}` : name;
+    if (to === from) return;
+    await this.moveTo(from, to, { verb: "move" });
   }
 
-  private async moveTo(from: string, to: string) {
-    if (to === from) return;
+  private async undoMove(from: string, to: string) {
+    const ok = await this.moveTo(from, to, { undo: false });
+    if (!ok && this.error) toasts.error(this.error);
+  }
+
+  private async moveTo(
+    from: string,
+    to: string,
+    opts: { undo?: boolean; verb?: "move" | "rename" } = {},
+  ): Promise<boolean> {
+    if (to === from) return true;
     try {
       await this.flush();
       const affected = (path: string) => path === from || path.startsWith(`${from}/`);
       if (this.hasDirty(affected)) {
         this.error = "Some files could not be saved. Retry saving before moving them.";
-        return;
+        return false;
       }
       const entry = await api.renameEntry(from, to);
       const remap = (p: string) => (p === from ? to : p.startsWith(`${from}/`) ? to + p.slice(from.length) : p);
@@ -1169,20 +1246,35 @@ class VaultStore {
         [...movedPaths, ...movedPaths.map(remap)],
         movedEntries.some((e) => e.isDir || isNote(e.path)),
       );
+      appEvents.emit("file-rename", { from, to, isDir: entry.isDir });
+      if (opts.undo !== false) {
+        const oldName = from.split("/").pop() ?? from;
+        const newName = to.split("/").pop() ?? to;
+        const destFolder = to.includes("/") ? to.slice(0, to.lastIndexOf("/")) : "";
+        const message =
+          opts.verb === "rename"
+            ? `Renamed "${oldName}" to "${newName}"`
+            : `Moved "${oldName}" to ${destFolder ? `"${destFolder}"` : "vault root"}`;
+        toasts.undo(message, () => this.undoMove(to, from));
+      }
+      return true;
     } catch (e) {
       this.error = String(e);
+      return false;
     }
   }
 
-  async trash(path: string) {
+  async trash(path: string, opts: { undo?: boolean } = {}) {
     try {
       await this.flush();
+      const wasActiveFile = this.openPath === path;
       const gone = (candidate: string) => candidate === path || candidate.startsWith(`${path}/`);
       if (this.hasDirty(gone)) {
         this.error = "Some files could not be saved. Retry saving before deleting them.";
         return;
       }
-      await api.trashEntry(path);
+      const trashed = await api.trashEntry(path);
+      this.trashVersion++;
       // Don't let a pending save recreate the file after it was trashed.
       for (const buffered of Object.keys(this.buffers)) if (gone(buffered)) this.discardBuffer(buffered);
       // The entry goes right away; a new note may take its name again.
@@ -1193,9 +1285,45 @@ class VaultStore {
         removed.length ? removed.map((e) => e.path) : [path],
         removed.some((e) => e.isDir || isNote(e.path)),
       );
+      appEvents.emit("file-delete", { path, isDir: removed.some((e) => e.path === path && e.isDir) });
+      if (opts.undo !== false) {
+        const label = path.split("/").pop() ?? path;
+        toasts.undo(`Moved "${label}" to trash`, async () => {
+          try {
+            await this.restoreTrash(trashed.name, trashed.originalPath, { reopenIfFile: wasActiveFile });
+          } catch (e) {
+            toasts.error(String(e));
+          }
+        });
+      }
     } catch (e) {
       this.error = String(e);
     }
+  }
+
+  async restoreTrash(
+    trashName: string,
+    target: string | null = null,
+    opts: { renameOnConflict?: boolean; reopenIfFile?: boolean } = {},
+  ): Promise<VaultEntry> {
+    const entry = await api.restoreTrashEntry(trashName, target, opts.renameOnConflict ?? false);
+    this.trashVersion++;
+    await this.refresh([entry.path]);
+    this.note(this.changes.files, [entry.path]);
+    if (entry.isDir || isNote(entry.path)) this.note(this.changes.notes, [entry.path]);
+    if (entry.path.includes("/")) ui.reveal(entry.path);
+    if (opts.reopenIfFile && !entry.isDir) await this.openFile(entry.path);
+    return entry;
+  }
+
+  async deleteTrashed(trashName: string) {
+    await api.deleteTrashEntry(trashName);
+    this.trashVersion++;
+  }
+
+  async emptyTrash() {
+    await api.emptyTrash();
+    this.trashVersion++;
   }
 }
 

@@ -7,8 +7,9 @@ use std::time::Duration;
 use dvoix_core::store::MAX_FILE_BYTES;
 
 /// Hosts a download may start at. GitHub redirects release files to its own
-/// storage hosts, which ureq follows.
-const ALLOWED_HOSTS: &[&str] = &["github.com", "raw.githubusercontent.com"];
+/// storage hosts, which ureq follows. `api.github.com` is only used for the
+/// release notes in the changelog; plugin files never come from it.
+const ALLOWED_HOSTS: &[&str] = &["github.com", "raw.githubusercontent.com", "api.github.com"];
 
 /// One agent for all downloads, so connections to GitHub stay open between
 /// requests: a manifest check, an install or an update check reuses the
@@ -62,6 +63,7 @@ mod tests {
         assert!(allowed(
             "https://raw.githubusercontent.com/a/b/main/registry.json"
         ));
+        assert!(allowed("https://api.github.com/repos/a/b/releases"));
         assert!(!allowed("http://github.com/a/b"));
         assert!(!allowed("https://github.com.evil.example/a"));
         assert!(!allowed("https://evil.example/github.com/"));

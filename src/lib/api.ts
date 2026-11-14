@@ -16,6 +16,15 @@ export interface VaultEntry {
   modified: number;
 }
 
+export interface TrashedEntry {
+  name: string;
+  trashPath: string;
+  originalPath: string | null;
+  isDir: boolean;
+  size: number;
+  deletedAt: number;
+}
+
 export interface SearchHit {
   path: string;
   title: string;
@@ -113,6 +122,19 @@ export interface RegistryEntry {
   /** GitHub repository `owner/name`. */
   repo: string;
   channel: "official" | "community";
+  /** The release the store installs (its tag). */
+  version: string;
+  /** SHA-256 of every file of that release, by file name; checked before installing. */
+  sha256: Record<string, string>;
+}
+
+/** One release of a plugin with its notes (see `dvoix_core::store::ReleaseNote`). */
+export interface ReleaseNote {
+  version: string;
+  name: string | null;
+  /** Markdown as the author wrote it; shown as plain text. */
+  notes: string;
+  published: string | null;
 }
 
 /** A plugin in `.dvoix/plugins/<id>/` (see `dvoix_core::store::InstalledPlugin`). */
@@ -151,13 +173,21 @@ export const api = {
     invoke<VaultEntry>("create_binary", bytes, { headers: { path: encodeURIComponent(path) } }),
   createFolder: (path: string) => invoke<VaultEntry>("create_folder", { path }),
   renameEntry: (from: string, to: string) => invoke<VaultEntry>("rename_entry", { from, to }),
-  trashEntry: (path: string) => invoke<void>("trash_entry", { path }),
+  trashEntry: (path: string) => invoke<TrashedEntry>("trash_entry", { path }),
+  listTrash: () => invoke<TrashedEntry[]>("list_trash"),
+  restoreTrashEntry: (name: string, target: string | null = null, renameOnConflict = false) =>
+    invoke<VaultEntry>("restore_trash_entry", { name, target, renameOnConflict }),
+  deleteTrashEntry: (name: string) => invoke<void>("delete_trash_entry", { name }),
+  emptyTrash: () => invoke<void>("empty_trash"),
+  listSnippets: () => invoke<string[]>("list_snippets"),
   search: (query: string) => invoke<SearchHit[]>("search", { query }),
   tags: () => invoke<TagCount[]>("tags"),
   notesWithTag: (tag: string) => invoke<NoteSummary[]>("notes_with_tag", { tag }),
   notesWhere: (key: string, value: string) => invoke<NoteSummary[]>("notes_where", { key, value }),
   backlinks: (path: string) => invoke<NoteSummary[]>("backlinks", { path }),
   graph: () => invoke<GraphData>("graph"),
+  /** The graph data of only these notes; a path missing from the answer is not a note (anymore). */
+  graphNotes: (paths: string[]) => invoke<GraphData>("graph_notes", { paths }),
   tasks: () => invoke<TaskItem[]>("tasks"),
   setTaskDone: (path: string, line: number, text: string, done: boolean) =>
     invoke<VaultEntry>("set_task_done", { path, line, text, done }),
@@ -167,8 +197,12 @@ export const api = {
 
 
   storeRegistry: () => invoke<RegistryEntry[]>("store_registry"),
-  storeLatestManifest: (repo: string) => invoke<StoreManifest>("store_latest_manifest", { repo }),
-  storeInstall: (repo: string, id: string) => invoke<StoreManifest>("store_install", { repo, id }),
+  /** The manifest of the release the entry pins, checked against its checksum. */
+  storeManifest: (entry: RegistryEntry) => invoke<StoreManifest>("store_manifest", { entry }),
+  /** Release notes of the newest releases of a repository, newest first. */
+  storeChangelog: (repo: string) => invoke<ReleaseNote[]>("store_changelog", { repo }),
+  /** Installs the release the entry pins; refused if a file does not match its checksum. */
+  storeInstall: (entry: RegistryEntry) => invoke<StoreManifest>("store_install", { entry }),
   storeUninstall: (id: string) => invoke<void>("store_uninstall", { id }),
   storeInstalled: () => invoke<InstalledPlugin[]>("store_installed"),
 };

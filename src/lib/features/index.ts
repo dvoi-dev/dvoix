@@ -19,6 +19,7 @@ import { tabsFeature } from "./tabs";
 import { editorModesFeature } from "./editor-modes";
 import { statusBarFeature } from "./status-bar";
 import { editorToolbarFeature } from "./editor-toolbar";
+import { trashFeature } from "./trash";
 
 export const coreFeatures: Plugin[] = [
   fileExplorerFeature,
@@ -35,4 +36,5 @@ export const coreFeatures: Plugin[] = [
   editorModesFeature,
   statusBarFeature,
   editorToolbarFeature,
+  trashFeature,
 ];
