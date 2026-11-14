@@ -122,6 +122,19 @@ export interface RegistryEntry {
   /** GitHub repository `owner/name`. */
   repo: string;
   channel: "official" | "community";
+  /** The release the store installs (its tag). */
+  version: string;
+  /** SHA-256 of every file of that release, by file name; checked before installing. */
+  sha256: Record<string, string>;
+}
+
+/** One release of a plugin with its notes (see `dvoix_core::store::ReleaseNote`). */
+export interface ReleaseNote {
+  version: string;
+  name: string | null;
+  /** Markdown as the author wrote it; shown as plain text. */
+  notes: string;
+  published: string | null;
 }
 
 /** A plugin in `.dvoix/plugins/<id>/` (see `dvoix_core::store::InstalledPlugin`). */
@@ -184,8 +197,12 @@ export const api = {
 
 
   storeRegistry: () => invoke<RegistryEntry[]>("store_registry"),
-  storeLatestManifest: (repo: string) => invoke<StoreManifest>("store_latest_manifest", { repo }),
-  storeInstall: (repo: string, id: string) => invoke<StoreManifest>("store_install", { repo, id }),
+  /** The manifest of the release the entry pins, checked against its checksum. */
+  storeManifest: (entry: RegistryEntry) => invoke<StoreManifest>("store_manifest", { entry }),
+  /** Release notes of the newest releases of a repository, newest first. */
+  storeChangelog: (repo: string) => invoke<ReleaseNote[]>("store_changelog", { repo }),
+  /** Installs the release the entry pins; refused if a file does not match its checksum. */
+  storeInstall: (entry: RegistryEntry) => invoke<StoreManifest>("store_install", { entry }),
   storeUninstall: (id: string) => invoke<void>("store_uninstall", { id }),
   storeInstalled: () => invoke<InstalledPlugin[]>("store_installed"),
 };

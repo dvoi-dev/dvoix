@@ -1,6 +1,8 @@
 // App state for the open vault and the open file, shared by all components.
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { untrack } from "svelte";
 import { api, onVaultChanged, type VaultChange, type VaultEntry, type VaultInfo } from "./api";
+import { appEvents } from "./events";
 import { creatableFileTypes, type FileType } from "./filetypes";
 import { flushConfig } from "./config";
 import { plugins } from "./plugins/manager.svelte";
@@ -56,6 +58,12 @@ export interface ChangeGroup {
    * path alone would miss the note that was not last in the batch.
    */
   paths: string[];
+}
+
+/** One path of a batch of changes on disk and what happened to it. */
+export interface VaultChangeKind {
+  path: string;
+  kind: VaultChange["kind"];
 }
 
 /** True for a note: only notes are indexed, so only they change the panels of notes. */
@@ -132,10 +140,13 @@ class VaultStore {
   });
 
   /** Called with the paths of every batch of changes, for store plugins (`dvoix.vault.onChange`). */
-  private changeListeners = new Set<(paths: string[]) => void>();
+  private changeListeners = new Set<(paths: string[], changes: VaultChangeKind[]) => void>();
 
-  /** Calls `fn` with the vault-relative paths of every batch of changes; returns the unsubscribe. */
-  onChanges(fn: (paths: string[]) => void): () => void {
+  /**
+   * Calls `fn` with the vault-relative paths of every batch of changes on
+   * disk, and what happened to each; returns the unsubscribe.
+   */
+  onChanges(fn: (paths: string[], changes: VaultChangeKind[]) => void): () => void {
     this.changeListeners.add(fn);
     return () => {
       this.changeListeners.delete(fn);
@@ -148,11 +159,29 @@ class VaultStore {
   private selfWrites: { path: string; size: number; modified: number; at: number }[] = [];
   private unlisten: (() => void) | undefined;
   private unlistenViews: (() => void) | undefined;
+  private stopActiveWatch: (() => void) | undefined;
+  /** What `active-file-change` last said, so it only fires on a real change. */
+  private announced: { path: string | null; view: string | null } | null = null;
   private tearingDown = false;
 
   async init() {
     this.unlisten?.();
     this.unlistenViews?.();
+    this.stopActiveWatch?.();
+    // Every way the active file changes (switching tabs, opening a link,
+    // renaming the open file, closing its tab) ends in `openPath`/`openView`,
+    // so watching those two catches all of them, once per change.
+    this.stopActiveWatch = $effect.root(() => {
+      $effect(() => {
+        if (!this.info || this.tearingDown) return;
+        const next = { path: this.openPath, view: this.openView };
+        untrack(() => {
+          if (this.announced && next.path === this.announced.path && next.view === this.announced.view) return;
+          this.announced = next;
+          appEvents.emit("active-file-change", next);
+        });
+      });
+    });
     this.unlistenViews = plugins.onViewRemoved((id) => {
       // When the whole vault closes, its tabs are dropped anyway (and saved before).
       if (!this.tearingDown) void this.closeTabsWhere((t) => t.view === id);
@@ -171,18 +200,19 @@ class VaultStore {
     try {
       await this.teardown();
       const info = await api.openVault(path);
-      // Settings, workspace and plugins of this vault, all from `<vault>/.dvoix/`.
-      await Promise.all([settings.load(), ui.load(info.path)]);
+      // Settings, workspace and the list of the vault before the plugins load,
+      // so `vault.list()` and `vault.write()` already know the vault in `onload`.
+      await Promise.all([settings.load(), ui.load(info.path), this.refresh()]);
       await snippets.refresh();
       this.openPath = null;
+      this.openView = null;
+      this.announced = null;
       this.content = "";
       this.dirty = false;
       this.error = null;
       await plugins.loadVault();
       await pluginStore.loadVault();
       this.info = info;
-      // The tabs need the list of the vault to drop vanished files: list first.
-      await this.refresh();
       await this.restoreTabs();
     } catch (e) {
       this.error = String(e);
@@ -218,6 +248,7 @@ class VaultStore {
     this.trashVersion++;
     this.openPath = null;
     this.openView = null;
+    this.announced = null;
     this.tabs = [];
     this.recent = [];
     this.navHistory = [];
@@ -323,10 +354,11 @@ class VaultStore {
     if (notePaths.length) this.note(this.changes.notes, notePaths);
     if (listAgain) this.scheduleRefresh(lastAdded);
     const paths = [...new Set(changes.map((c) => c.path))];
+    const kinds = changes.map((c) => ({ path: c.path, kind: c.kind }));
     for (const fn of this.changeListeners) {
       // A broken plugin must not stop the app's own panels from updating.
       try {
-        fn(paths);
+        fn(paths, kinds);
       } catch (e) {
         console.error(e);
       }
@@ -706,6 +738,7 @@ class VaultStore {
       // Remember our write, so its watcher echo does not read the file back.
       this.noteWritten(entry);
       if (this.openPath === path && this.content === content) this.dirty = false;
+      appEvents.emit("file-save", { path });
     } catch (e) {
       this.error = `Saving failed: ${e}`;
     }
@@ -717,6 +750,33 @@ class VaultStore {
     const fresh = await api.readFile(path).catch(() => null);
     // The tab may have moved on while the file was read.
     if (this.openPath === path && fresh !== null && fresh !== this.content && !this.dirty) this.content = fresh;
+  }
+
+  /**
+   * Writes `content` to `path` for a plugin (`dvoix.vault.write`), creating
+   * the file if it does not exist yet.
+   */
+  async writePluginFile(path: string, content: string): Promise<void> {
+    if (!this.entryAt(path)) {
+      try {
+        const entry = await api.createFile(path, content);
+        if (!entry.path.split("/").some((p) => p.startsWith("."))) {
+          this.insertEntry(entry);
+          this.appliedOwnChange([entry.path], isNote(entry.path));
+        }
+        appEvents.emit("file-create", { path: entry.path, isDir: false });
+        return;
+      } catch (e) {
+        if (!String(e).startsWith("path already exists:")) throw e;
+      }
+    }
+    const entry = await api.writeFile(path, content);
+    const found = this.fileByPath.get(entry.path.toLowerCase());
+    if (found) {
+      found.size = entry.size;
+      found.modified = entry.modified;
+      this.entriesVersion++;
+    }
   }
 
   creatable(): FileType[] {
@@ -741,6 +801,7 @@ class VaultStore {
       // the same name again, and the tree works without watcher events.
       this.insertEntry(entry);
       this.appliedOwnChange([path], isNote(path));
+      appEvents.emit("file-create", { path, isDir: false });
       await this.openFile(path, opts);
     } catch (e) {
       this.error = String(e);
@@ -757,6 +818,7 @@ class VaultStore {
       // The row exists right away, so the inline rename has something to edit.
       this.insertEntry(entry);
       this.appliedOwnChange([entry.path], true);
+      appEvents.emit("file-create", { path: entry.path, isDir: true });
       if (parent) ui.reveal(`${prefix}${name}`);
       return `${prefix}${name}`;
     } catch (e) {
@@ -821,6 +883,7 @@ class VaultStore {
         [...movedPaths, ...movedPaths.map(remap)],
         movedEntries.some((e) => e.isDir || isNote(e.path)),
       );
+      appEvents.emit("file-rename", { from, to, isDir: entry.isDir });
       if (opts.undo !== false) {
         const oldName = from.split("/").pop() ?? from;
         const newName = to.split("/").pop() ?? to;
@@ -857,6 +920,7 @@ class VaultStore {
         removed.length ? removed.map((e) => e.path) : [path],
         removed.some((e) => e.isDir || isNote(e.path)),
       );
+      appEvents.emit("file-delete", { path, isDir: removed.some((e) => e.path === path && e.isDir) });
       if (opts.undo !== false) {
         const label = path.split("/").pop() ?? path;
         toasts.undo(`Moved "${label}" to trash`, async () => {

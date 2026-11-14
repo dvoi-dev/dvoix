@@ -55,7 +55,7 @@ crates/dvoix-core/      Rust core without Tauri, testable on its own
   src/vault.rs          reading/writing in the vault, paths always relative and checked
   src/markdown.rs       frontmatter, title, tags, links, headings, search text, HTML for the reading view
   src/tasks.rs          read and toggle checkbox tasks
-  src/store.rs          plugin store: plugin list, manifest.json, installing into .dvoix/plugins/
+  src/store.rs          plugin store: plugin list, manifest.json, checksums, release notes, installing into .dvoix/plugins/
   src/index.rs          SQLite index in <vault>/.dvoix/index.sqlite (cache only)
   src/watcher.rs        reports changes on disk
 src-tauri/              Tauri app: holds the open vault, connects watcher, index and UI
@@ -64,6 +64,7 @@ src-tauri/              Tauri app: holds the open vault, connects watcher, index
 src/                    Svelte frontend
   lib/api.ts            typed calls to the Rust commands
   lib/vault.svelte.ts   app state: open vault, open file, saving
+  lib/events.ts         app events plugins listen to (active file, save, create, rename, delete)
   lib/config.ts         read and write JSON files in <vault>/.dvoix/
   lib/settings.svelte.ts  editor and appearance settings
   lib/ui.svelte.ts      workspace: active panel, width, expanded folders, open tabs
@@ -91,7 +92,7 @@ Like `.obsidian/` in Obsidian. Everything that belongs to the vault lives here; 
   snippets/*.css            user CSS snippets
   plugins/<id>/data.json    settings of a plugin (e.g. plugins/tasks/data.json)
   plugins/<id>/manifest.json, main.js, styles.css   a plugin from the store
-  store.json                store plugins: on/off, where they come from, community plugins allowed yes/no
+  store.json                store plugins: on/off, where they come from, community plugins allowed yes/no, check for updates on open yes/no
   index.sqlite              search index, cache only
 ```
 
@@ -116,6 +117,7 @@ Every function hooks into the app through a small API, the same for core feature
 | `ctx.registerView(...)` | own view that runs like a file in a tab (graph); open with `vault.openViewTab(id)` |
 | `ctx.addSettingTab(...)` | own page in the settings |
 | `ctx.loadData()` / `ctx.saveData()` | own data in `.dvoix/plugins/<id>/data.json` |
+| `ctx.on(event, handler)` | app events (`src/lib/events.ts`): `active-file-change`, `file-save` (the editor saved), `file-create`, `file-rename`, `file-delete` (made in dvoix); changes from outside come through the file watcher |
 
 ### Hidden files
 
@@ -135,14 +137,20 @@ The "Right sidebar" plugin adds a second sidebar on the right edge of the window
 
 ### Plugin store
 
-Besides the built-in core plugins there are plugins you install only when needed: **Settings → Plugin store**. Under "Browse" is the plugin list with search; a click shows details, version and permissions and installs the plugin. Under "Installed" you can turn them on and off, update them ("Check for updates") and uninstall them. Uninstalling keeps the plugin's settings (`data.json`).
+Besides the built-in core plugins there are plugins you install only when needed: **Settings → Plugin store**. Under "Browse" is the plugin list with search; a click shows details, version, permissions and the changelog (the release notes from GitHub, shown as plain text) and installs the plugin. Under "Installed" you can turn them on and off, update them and uninstall them. Uninstalling keeps the plugin's settings (`data.json`).
+
+When a vault with store plugins opens, the app loads the plugin list in the background. If it offers a newer version of an installed plugin, a dot appears on the settings button and the number of updates next to "Plugin store" and "Installed"; the details then show what is new since the installed version. "Check for updates" loads the list again; the switch "Check for updates when the vault opens" turns the automatic check off (`checkUpdates` in `store.json`).
 
 - **Official plugins** are maintained by dvoix itself. They can always be installed.
 - **Community plugins** are written by others. They only work once "Allow community plugins" is on, and a warning appears before that. Turning the switch off again unloads them immediately.
 
 The plugin list is a `registry.json` in the repository [`dvoi-dev/dvoix-plugins`](https://github.com/dvoi-dev/dvoix-plugins); the plugins themselves come from the GitHub releases of their own repositories. Downloads only happen over https from GitHub. The app only shows "official" for repositories of `dvoi-dev`, regardless of what the list says.
 
+The list pins every plugin to one release and holds the SHA-256 checksum of each of its files. The app installs exactly that release and checks every file before writing anything; a file that does not match is refused. A release that is replaced or changed after it went into the list therefore never gets installed, and a new version reaches users once the list is updated.
+
 Each plugin states in its manifest what it needs (`vault:read`, `vault:write`, `editor`, `process` for starting programs in the vault folder, e.g. AI agent tools). This is shown in the store before installing, and the API refuses anything that is not declared. It is not a sandbox: like in Obsidian, plugins run inside the app and could bypass the API. That is why official and community plugins are kept apart.
+
+The app window runs with a strict Content Security Policy (`app.security.csp` in `src-tauri/tauri.conf.json`): scripts only from the app itself and from the `blob:` URLs store plugins are loaded from, no `eval`, no frames, objects or workers, and network requests from the page only to the app's own backend. Images may still come from `https:`, so remote images in notes keep working. This limits what a broken or hostile script (e.g. from a note) can load or send, but it is defense in depth, not a sandbox: a plugin still runs with the rights of the app and can start programs with `process`.
 
 How to write a plugin for the store is described in [`docs/plugins/README.md`](docs/plugins/README.md), with an example plugin in `docs/plugins/hello/`.
 

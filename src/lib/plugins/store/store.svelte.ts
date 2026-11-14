@@ -4,13 +4,17 @@
 // A store plugin lives in `.dvoix/plugins/<id>/` (manifest.json, main.js,
 // styles.css); what is on and where it came from is in `.dvoix/store.json`:
 //
-//   { "allowCommunity": false,
+//   { "allowCommunity": false, "checkUpdates": true,
 //     "plugins": { "kanban": { "enabled": true, "repo": "dvoi-dev/dvoix-kanban", "channel": "official" } } }
 //
 // Official plugins can be installed right away. Community plugins only once
 // `allowCommunity` is switched on; switching it off again unloads them.
+//
+// The plugin list pins every plugin to one release with the SHA-256 of its
+// files, so "is there an update" is a comparison with the list: one download
+// when the vault opens instead of one per plugin.
 import { getVersion } from "@tauri-apps/api/app";
-import { api, type InstalledPlugin, type RegistryEntry, type StoreManifest } from "../../api";
+import { api, type InstalledPlugin, type RegistryEntry, type ReleaseNote, type StoreManifest } from "../../api";
 import { readJsonRaw, writeJson } from "../../config";
 import { plugins } from "../manager.svelte";
 import type { Plugin } from "../types";
@@ -29,8 +33,12 @@ interface StoreRecord {
 
 interface StoreFile {
   allowCommunity: boolean;
+  /** Load the plugin list when the vault opens, to show available updates (default on). */
+  checkUpdates: boolean;
   plugins: Record<string, StoreRecord>;
 }
+
+const emptyFile = (): StoreFile => ({ allowCommunity: false, checkUpdates: true, plugins: {} });
 
 /** `a` is newer than `b` (both `major.minor.patch`). */
 export function isNewer(a: string, b: string): boolean {
@@ -101,13 +109,15 @@ function wrap(installed: InstalledPlugin): Plugin {
 class PluginStore {
   /** Store plugins found in `.dvoix/plugins/`. */
   installed = $state<InstalledPlugin[]>([]);
-  file = $state<StoreFile>({ allowCommunity: false, plugins: {} });
+  file = $state<StoreFile>(emptyFile());
   /** The plugin list, once loaded. */
   registry = $state<RegistryEntry[] | null>(null);
   registryError = $state<string | null>(null);
   loadingRegistry = $state(false);
-  /** Newest release manifest per plugin id, from `checkUpdates` or the details. */
-  latest = $state<Record<string, StoreManifest>>({});
+  /** Manifest of the release the list pins, per plugin id (for the details and before an update). */
+  manifests = $state<Record<string, StoreManifest>>({});
+  /** Release notes per repository, loaded when a plugin's details are opened. */
+  changelogs = $state<Record<string, ReleaseNote[] | { error: string }>>({});
   /** What is running for a plugin right now, e.g. "Installing …". */
   busy = $state<Record<string, string>>({});
   /** Last error of an install, update or uninstall, by plugin id. */
@@ -121,6 +131,7 @@ class PluginStore {
     const f = (raw && typeof raw === "object" ? raw : {}) as Partial<StoreFile>;
     this.file = {
       allowCommunity: f.allowCommunity === true,
+      checkUpdates: f.checkUpdates !== false,
       plugins: f.plugins && typeof f.plugins === "object" ? f.plugins : {},
     };
     this.appVersion = version;
@@ -128,13 +139,22 @@ class PluginStore {
     // Activations run one after another: the manager queues them anyway and
     // a plugin may rely on the ones before it being loaded.
     for (const p of this.installed) if (this.isEnabled(p.manifest.id)) await this.activate(p);
+    // Updates show as a badge without anyone pressing "Check for updates".
+    // In the background, so a slow network does not hold up the vault, and
+    // only when there is something from the store to update.
+    if (this.file.checkUpdates && this.installed.some((p) => this.file.plugins[p.manifest.id]?.repo)) {
+      void this.fetchRegistry();
+    }
   }
 
   /** Vault closed; the manager has unloaded the plugins already. */
   reset() {
     this.installed = [];
-    this.file = { allowCommunity: false, plugins: {} };
-    this.latest = {};
+    this.file = emptyFile();
+    this.registry = null;
+    this.registryError = null;
+    this.manifests = {};
+    this.changelogs = {};
     this.busy = {};
     this.errors = {};
   }
@@ -171,10 +191,26 @@ class PluginStore {
     return this.needsNewerApp(this.installedManifest(id));
   }
 
+  /** The list pins a newer release than the installed one. */
   hasUpdate(id: string): boolean {
     const now = this.installedManifest(id);
-    const next = this.latest[id];
+    const next = this.entryFor(id);
     return !!now && !!next && isNewer(next.version, now.version);
+  }
+
+  /** How many installed plugins have an update, for the badges. */
+  updateCount = $derived.by(() => this.installed.filter((p) => this.hasUpdate(p.manifest.id)).length);
+
+  /** The manifest of the release the list pins for `id`, once fetched. */
+  releaseManifest(id: string): StoreManifest | undefined {
+    const m = this.manifests[id];
+    const entry = this.entryFor(id) ?? this.registry?.find((e) => e.id === id);
+    return m && entry && m.version === entry.version ? m : undefined;
+  }
+
+  setCheckUpdates(on: boolean) {
+    this.file.checkUpdates = on;
+    this.save();
   }
 
   /** The id is taken by a core feature or a core plugin. */
@@ -218,26 +254,31 @@ class PluginStore {
     }
   }
 
-  /** The newest release of a plugin, for the details and to see updates. */
-  async fetchLatest(entry: RegistryEntry): Promise<StoreManifest | undefined> {
+  /** The manifest of the release the list pins, for its permissions and the dvoix version it needs. */
+  async fetchManifest(entry: RegistryEntry): Promise<StoreManifest | undefined> {
     try {
-      const m = await api.storeLatestManifest(entry.repo);
-      this.latest = { ...this.latest, [entry.id]: m };
+      const m = await api.storeManifest($state.snapshot(entry));
+      this.manifests = { ...this.manifests, [entry.id]: m };
       return m;
     } catch (e) {
       this.errors = { ...this.errors, [entry.id]: String(e) };
     }
   }
 
-  /** Looks for newer releases of all installed plugins that came from the store. */
+  /** The release notes of a plugin, once per repository and session. */
+  async fetchChangelog(entry: RegistryEntry) {
+    if (this.changelogs[entry.repo]) return;
+    try {
+      const notes = await api.storeChangelog(entry.repo);
+      this.changelogs = { ...this.changelogs, [entry.repo]: notes };
+    } catch (e) {
+      this.changelogs = { ...this.changelogs, [entry.repo]: { error: String(e) } };
+    }
+  }
+
+  /** Loads the plugin list again; updates are what it pins newer than installed. */
   async checkUpdates() {
-    if (!this.registry) await this.fetchRegistry();
-    await Promise.all(
-      this.installed.map((p) => {
-        const entry = this.entryFor(p.manifest.id);
-        return entry ? this.fetchLatest(entry) : undefined;
-      }),
-    );
+    await this.fetchRegistry();
   }
 
   /**
@@ -245,14 +286,15 @@ class PluginStore {
    * GitHub names are case-insensitive, so the match is too. An official entry
    * also matches when the repo moved (e.g. from a user account into the
    * `dvoi-dev` org): official repos are only ever `dvoi-dev`, so this cannot
-   * hand the plugin to a stranger. A community plugin whose repo changed stays
-   * without updates until it is reinstalled.
+   * hand the plugin to a stranger. A community plugin whose repo changed (or a
+   * plugin copied into the folder by hand) stays without updates until it is
+   * installed from the store.
    */
   entryFor(id: string): RegistryEntry | undefined {
     const repo = this.file.plugins[id]?.repo?.toLowerCase();
     const forId = this.registry?.filter((e) => e.id === id) ?? [];
     return (
-      forId.find((e) => !repo || e.repo.toLowerCase() === repo) ??
+      (repo ? forId.find((e) => e.repo.toLowerCase() === repo) : undefined) ??
       forId.find((e) => e.channel === "official")
     );
   }
@@ -260,12 +302,12 @@ class PluginStore {
   async install(entry: RegistryEntry) {
     if (entry.channel === "community" && !this.file.allowCommunity) return;
     await this.run(entry.id, "Installing …", async () => {
-      await api.storeInstall(entry.repo, entry.id);
+      await api.storeInstall($state.snapshot(entry));
       this.file.plugins[entry.id] = { enabled: true, repo: entry.repo, channel: entry.channel };
       this.save();
       await this.refreshInstalled();
       const p = this.installed.find((p) => p.manifest.id === entry.id);
-      if (p) this.latest = { ...this.latest, [entry.id]: p.manifest };
+      if (p) this.manifests = { ...this.manifests, [entry.id]: p.manifest };
       if (p && this.isEnabled(entry.id)) await this.activate(p);
     });
   }
@@ -274,9 +316,13 @@ class PluginStore {
     const entry = this.entryFor(id);
     if (!entry) return;
     await this.run(id, "Updating …", async () => {
+      // The new release may need a newer dvoix; then the old one stays.
+      const next = this.releaseManifest(id) ?? (await api.storeManifest($state.snapshot(entry)));
+      this.manifests = { ...this.manifests, [id]: next };
+      if (this.needsNewerApp(next)) throw new Error(`Version ${next.version} needs dvoix ${next.minAppVersion} or newer`);
       await plugins.unloadExtra(id);
       try {
-        await api.storeInstall(entry.repo, id);
+        await api.storeInstall($state.snapshot(entry));
         // The registry may have changed the channel since the install.
         const rec = this.file.plugins[id];
         this.file.plugins[id] = { enabled: rec?.enabled ?? true, repo: entry.repo, channel: entry.channel };

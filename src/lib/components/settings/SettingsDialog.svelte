@@ -12,7 +12,7 @@
   import Setting from "./Setting.svelte";
   import StorePage from "./StorePage.svelte";
   import Toggle from "./Toggle.svelte";
-  import { hotkeyLabel, plugins, type Plugin } from "../../plugins";
+  import { hotkeyLabel, plugins, pluginStore, type Plugin } from "../../plugins";
   import {
     APPEARANCE_DEFAULTS,
     settings,
@@ -147,6 +147,11 @@
       <button class={navBtn(page === "store")} onclick={() => (page = "store")}>
         <Store size={14} strokeWidth={1.75} class={page === "store" ? "text-violet-400" : "text-zinc-500"} />
         <span class="truncate">Plugin store</span>
+        {#if pluginStore.updateCount}
+          <span class="ml-auto rounded-full bg-violet-600 px-1.5 text-[10px] leading-4 font-medium text-white" title="Plugin updates available">
+            {pluginStore.updateCount}
+          </span>
+        {/if}
       </button>
       {#if pluginPages.length}
         <div class="px-2.5 pt-4 pb-1 text-[11px] font-medium tracking-wide text-zinc-500 uppercase">Plugin options</div>

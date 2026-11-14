@@ -1,13 +1,15 @@
 <script lang="ts">
   // The plugin store page in the settings: browse the plugin list, look at a
   // plugin's details and permissions, install, update, turn on/off and remove
-  // store plugins, and the switch for community plugins.
-  import { ArrowLeft, BadgeCheck, Download, RefreshCw, Search, ShieldAlert, Trash2, Users } from "@lucide/svelte";
+  // store plugins, their changelog, and the switches for community plugins
+  // and for looking for updates when the vault opens.
+  import { ArrowLeft, BadgeCheck, Download, RefreshCw, Search, ShieldAlert, ShieldCheck, Trash2, Users } from "@lucide/svelte";
   import Setting from "./Setting.svelte";
   import Toggle from "./Toggle.svelte";
-  import type { RegistryEntry } from "../../api";
+  import type { RegistryEntry, ReleaseNote } from "../../api";
   import { plugins, pluginStore } from "../../plugins";
   import { PERMISSION_LABELS } from "../../plugins/store/api";
+  import { isNewer } from "../../plugins/store/store.svelte";
 
   let { onOptions }: { onOptions: (pluginId: string) => void } = $props();
 
@@ -32,12 +34,38 @@
   });
 
   const entry = $derived(selected ? pluginStore.registry?.find((e) => e.id === selected) : undefined);
-  const latest = $derived(selected ? pluginStore.latest[selected] : undefined);
+  const latest = $derived(selected ? pluginStore.releaseManifest(selected) : undefined);
 
-  // The details show version and permissions of the newest release.
+  // The details show permissions and changelog of the release the list pins.
   $effect(() => {
-    if (entry && !pluginStore.latest[entry.id]) void pluginStore.fetchLatest(entry);
+    if (!entry) return;
+    if (!pluginStore.releaseManifest(entry.id)) void pluginStore.fetchManifest(entry);
+    void pluginStore.fetchChangelog(entry);
   });
+
+  /**
+   * The releases worth showing: for an update everything after the installed
+   * version, otherwise the last few. Releases after the one the list pins are
+   * not offered yet, so they are left out.
+   */
+  const changelog = $derived.by((): { title: string; notes: ReleaseNote[] } | { error: string } | null => {
+    if (!entry) return null;
+    const all = pluginStore.changelogs[entry.repo];
+    if (!all) return null;
+    if ("error" in all) return all;
+    const offered = all.filter((r) => !isNewer(r.version, entry.version));
+    const installed = pluginStore.installedManifest(entry.id);
+    if (installed && isNewer(entry.version, installed.version)) {
+      return { title: "What's new", notes: offered.filter((r) => isNewer(r.version, installed.version)) };
+    }
+    return { title: "Changelog", notes: offered.slice(0, 5) };
+  });
+
+  function day(iso: string | null): string {
+    if (!iso) return "";
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  }
 
   function errorOf(id: string) {
     return pluginStore.errors[id] ?? plugins.errors[id];
@@ -50,6 +78,23 @@
     } finally {
       checking = false;
     }
+  }
+
+  /**
+   * Updates from the "Installed" list when the permissions stay the same;
+   * opens the details page first when the new version asks for a new permission.
+   */
+  async function updateFromList(id: string) {
+    const target = pluginStore.entryFor(id);
+    const current = pluginStore.installedManifest(id);
+    if (!target || !current) return;
+    const next = pluginStore.releaseManifest(id) ?? (await pluginStore.fetchManifest(target));
+    if (!next) return;
+    if (next.permissions.some((p) => !current.permissions.includes(p))) {
+      selected = id;
+      return;
+    }
+    await pluginStore.update(id);
   }
 
   function setCommunity(on: boolean) {
@@ -113,7 +158,7 @@
     </div>
     <div class="mt-0.5 text-xs text-zinc-500">
       by {entry.author} · <span class="select-text">github.com/{entry.repo}</span>
-      {#if latest} · Version {latest.version}{/if}
+      · Version {entry.version}
       {#if installed} · installed: {installed.version}{/if}
     </div>
     <p class="mt-3 text-sm leading-relaxed text-zinc-300">{entry.description}</p>
@@ -123,7 +168,14 @@
       <p class="mt-1 text-xs text-zinc-500">{errorOf(id) ? "Could not be loaded." : "Loading …"}</p>
     {:else if latest.permissions.length}
       <ul class="mt-1 list-disc pl-5 text-xs text-zinc-300">
-        {#each latest.permissions as p (p)}<li>{PERMISSION_LABELS[p]}</li>{/each}
+        {#each latest.permissions as p (p)}
+          <li>
+            {PERMISSION_LABELS[p]}
+            {#if installed && !installed.permissions.includes(p)}
+              <span class="ml-1 rounded bg-amber-500/15 px-1 py-px text-[10px] font-medium text-amber-300">New in {entry.version}</span>
+            {/if}
+          </li>
+        {/each}
       </ul>
     {:else}
       <p class="mt-1 text-xs text-zinc-400">None: the plugin does not want access to your files or the editor.</p>
@@ -136,6 +188,9 @@
     {#if pluginStore.needsNewerApp(latest)}
       <p class="mt-2 text-xs text-amber-300">Needs dvoix {latest?.minAppVersion} or newer (you have {pluginStore.appVersion}).</p>
     {/if}
+    <p class="mt-2 inline-flex items-center gap-1 text-[11px] text-zinc-500">
+      <ShieldCheck size={12} /> Every file is checked against the SHA-256 checksum in the plugin list before it is installed.
+    </p>
 
     <div class="mt-4 flex flex-wrap items-center gap-2">
       {#if blocked && !installed}
@@ -151,8 +206,8 @@
         </button>
       {:else}
         {#if pluginStore.hasUpdate(id)}
-          <button class={primary} disabled={!!busy || pluginStore.needsNewerApp(latest)} onclick={() => pluginStore.update(id)}>
-            <RefreshCw size={13} /> Update to {latest?.version}
+          <button class={primary} disabled={!!busy || !latest || pluginStore.needsNewerApp(latest)} onclick={() => pluginStore.update(id)}>
+            <RefreshCw size={13} /> Update to {entry.version}
           </button>
         {/if}
         <button class={btn} disabled={!!busy} onclick={() => pluginStore.uninstall(id)}><Trash2 size={13} /> Uninstall</button>
@@ -164,12 +219,38 @@
     {/if}
     {#if errorOf(id)}<p class="mt-2 text-xs text-red-400">{errorOf(id)}</p>{/if}
     {#if confirmCommunity}{@render communityWarning()}{/if}
+
+    {#if changelog}
+      {#if "error" in changelog}
+        <div class="mt-5 text-[11px] font-medium tracking-wide text-zinc-500 uppercase">Changelog</div>
+        <p class="mt-1 text-xs text-zinc-500">The release notes could not be loaded.</p>
+      {:else if changelog.notes.length}
+        <div class="mt-5 text-[11px] font-medium tracking-wide text-zinc-500 uppercase">{changelog.title}</div>
+        <ol class="mt-1 max-h-72 space-y-3 overflow-y-auto pr-1">
+          {#each changelog.notes as r (r.version)}
+            <li>
+              <div class="text-xs text-zinc-200">
+                <span class="font-medium">{r.version}</span>{#if r.name}<span class="text-zinc-400"> · {r.name}</span>{/if}
+                {#if r.published}<span class="text-zinc-500"> · {day(r.published)}</span>{/if}
+              </div>
+              <!-- The author's Markdown as plain text: release notes are not trusted HTML. -->
+              <p class="mt-0.5 text-xs leading-relaxed whitespace-pre-wrap text-zinc-400 select-text">{r.notes || "No release notes."}</p>
+            </li>
+          {/each}
+        </ol>
+      {/if}
+    {/if}
   </div>
 {:else}
   <div class="flex items-center gap-2 pt-3">
     <button class={tabBtn(tab === "browse")} onclick={() => (tab = "browse")}>Browse</button>
-    <button class={tabBtn(tab === "installed")} onclick={() => (tab = "installed")}>
+    <button class="{tabBtn(tab === 'installed')} inline-flex items-center gap-1.5" onclick={() => (tab = "installed")}>
       Installed ({pluginStore.installed.length})
+      {#if pluginStore.updateCount}
+        <span class="rounded-full bg-violet-600 px-1.5 text-[10px] leading-4 font-medium text-white" title="Updates available">
+          {pluginStore.updateCount}
+        </span>
+      {/if}
     </button>
     <div class="flex-1"></div>
     {#if tab === "browse"}
@@ -188,6 +269,16 @@
     description="Plugins by other people. Official plugins are always allowed, community plugins only with this switch."
   >
     <Toggle label="Allow community plugins" checked={pluginStore.file.allowCommunity} onchange={setCommunity} />
+  </Setting>
+  <Setting
+    name="Check for updates when the vault opens"
+    description="Loads the plugin list from GitHub in the background and marks plugins with a newer release."
+  >
+    <Toggle
+      label="Check for updates when the vault opens"
+      checked={pluginStore.file.checkUpdates}
+      onchange={(v) => pluginStore.setCheckUpdates(v)}
+    />
   </Setting>
   {#if confirmCommunity}{@render communityWarning()}{/if}
 
@@ -237,8 +328,8 @@
       <Setting name="{p.manifest.name} {p.manifest.version}" description={p.manifest.description}>
         <div class="flex items-center gap-3">
           {#if pluginStore.hasUpdate(id)}
-            <button class="text-xs text-violet-300 hover:underline" disabled={!!pluginStore.busy[id]} onclick={() => pluginStore.update(id)}>
-              Update to {pluginStore.latest[id]?.version}
+            <button class="text-xs text-violet-300 hover:underline" disabled={!!pluginStore.busy[id]} onclick={() => updateFromList(id)}>
+              Update to {pluginStore.entryFor(id)?.version}
             </button>
           {/if}
           {#if on && plugins.settingTabs.some((t) => t.pluginId === id)}
