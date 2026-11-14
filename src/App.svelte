@@ -8,15 +8,19 @@
   import FilePane from "./lib/components/FilePane.svelte";
   import Welcome from "./lib/components/Welcome.svelte";
   import WindowControls from "./lib/components/WindowControls.svelte";
-  import SettingsDialog, { SETTINGS } from "./lib/components/settings/SettingsDialog.svelte";
+  import SettingsDialog from "./lib/components/settings/SettingsDialog.svelte";
+  import ToastContainer from "./lib/components/ToastContainer.svelte";
   import UpdateBanner from "./lib/components/UpdateBanner.svelte";
   import { flushConfig } from "./lib/config";
   import { plugins } from "./lib/plugins";
   import { settings } from "./lib/settings.svelte";
   import { ui } from "./lib/ui.svelte";
+  import { hotkeys } from "./lib/hotkeys.svelte";
   import { updater } from "./lib/updater.svelte";
   import { vault } from "./lib/vault.svelte";
   import { appWindow, dragRegion } from "./lib/window.svelte";
+
+  const HEX_RE = /^#[0-9a-fA-F]{6}$/;
 
   let ready = $state(false);
 
@@ -41,6 +45,24 @@
     el.dataset.theme = a.theme;
     el.dataset.accent = a.accentColor;
     el.classList.toggle("dark", a.theme !== "light");
+    if (a.accentColor === "custom" && HEX_RE.test(a.customAccentColor)) {
+      const hex = a.customAccentColor;
+      if (a.theme === "light") {
+        root.setProperty("--color-violet-300", `color-mix(in srgb, ${hex} 70%, black)`);
+        root.setProperty("--color-violet-400", `color-mix(in srgb, ${hex} 84%, black)`);
+        root.setProperty("--color-violet-500", hex);
+        root.setProperty("--color-violet-600", `color-mix(in srgb, ${hex} 82%, black)`);
+        root.setProperty("--color-violet-700", `color-mix(in srgb, ${hex} 65%, black)`);
+      } else {
+        root.setProperty("--color-violet-300", `color-mix(in srgb, ${hex} 65%, white)`);
+        root.setProperty("--color-violet-400", `color-mix(in srgb, ${hex} 82%, white)`);
+        root.setProperty("--color-violet-500", hex);
+        root.setProperty("--color-violet-600", `color-mix(in srgb, ${hex} 85%, black)`);
+        root.setProperty("--color-violet-700", `color-mix(in srgb, ${hex} 68%, black)`);
+      }
+    } else {
+      for (const shade of [300, 400, 500, 600, 700]) root.removeProperty(`--color-violet-${shade}`);
+    }
     const appFont = a.interfaceFont === "system" ? "var(--font-system)" : a.interfaceFont === "mono" ? "var(--font-mono)" : "var(--font-sans)";
     const edFont = a.editorFont === "serif" ? "var(--font-serif)" : a.editorFont === "mono" ? "var(--font-mono)" : "var(--font-sans)";
     root.setProperty("--app-font-sans", appFont);
@@ -50,17 +72,12 @@
     root.setProperty("--editor-max-width", settings.app.readableLineLength ? "48rem" : "none");
   });
 
-  /** App-wide shortcuts: plugin commands plus Ctrl+, for the settings. Captured before the editor sees them. */
+  /** App-wide shortcuts are captured before the editor sees them. */
   function shortcuts(e: KeyboardEvent) {
-    if (!vault.info) return;
-    const mod = e.ctrlKey || e.metaKey;
-    if (mod && !e.shiftKey && !e.altKey && e.key === ",") {
-      ui.toggleModal(SETTINGS);
-    } else {
-      const cmd = plugins.commandFor(e, ui.modal !== null);
-      if (!cmd) return;
-      void cmd.run();
-    }
+    if (!vault.info || hotkeys.capturing) return;
+    const cmd = plugins.commandFor(e, ui.modal !== null);
+    if (!cmd) return;
+    plugins.run(cmd.fullId);
     e.preventDefault();
     e.stopPropagation();
   }
@@ -93,7 +110,13 @@
           </div>
         </div>
         <div class="flex min-h-0 flex-1">
-          <FilePane />
+          {#if vault.split}
+            <FilePane />
+            <div class="w-px shrink-0 bg-zinc-800" role="separator" aria-orientation="vertical"></div>
+            <FilePane pane="right" />
+          {:else}
+            <FilePane />
+          {/if}
           <RightSidebar />
         </div>
       </div>
@@ -114,6 +137,7 @@
     {/if}
   </div>
   <ContextMenu />
+  <ToastContainer />
   {#each plugins.overlays as overlay (overlay.pluginId + overlay.id)}
     <overlay.component />
   {/each}

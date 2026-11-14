@@ -53,13 +53,16 @@ interface Privates {
   navHistory: unknown[];
   navIndex: number;
   selfWrites: unknown[];
-  saveTimer?: ReturnType<typeof setTimeout>;
+  saveTimers: Map<string, ReturnType<typeof setTimeout>>;
+  writeJobs: Map<string, Promise<void>>;
   refreshTimer?: ReturnType<typeof setTimeout>;
 }
 
 function reset() {
   const priv = vault as unknown as Privates;
-  clearTimeout(priv.saveTimer);
+  for (const timer of priv.saveTimers.values()) clearTimeout(timer);
+  priv.saveTimers.clear();
+  priv.writeJobs.clear();
   clearTimeout(priv.refreshTimer);
   priv.navHistory = [];
   priv.navIndex = -1;
@@ -68,10 +71,9 @@ function reset() {
   vault.entries = [];
   vault.tabs = [];
   vault.activeTabId = 0;
-  vault.openPath = null;
-  vault.openView = null;
-  vault.content = "";
-  vault.dirty = false;
+  vault.split = null;
+  vault.focusedPane = "left";
+  (vault as unknown as { buffers: Record<string, unknown> }).buffers = {};
   vault.error = null;
   vault.recent = [];
 }
@@ -86,7 +88,7 @@ beforeEach(() => {
   vi.mocked(api.createFile).mockImplementation(async (path) => entry(path));
   vi.mocked(api.createFolder).mockImplementation(async (path) => entry(path, true));
   vi.mocked(api.renameEntry).mockImplementation(async (_from, to) => entry(to));
-  vi.mocked(api.trashEntry).mockResolvedValue(undefined);
+  vi.mocked(api.trashEntry).mockImplementation(async (path) => ({ name: path, originalPath: path }) as never);
 });
 
 afterEach(() => {
@@ -272,9 +274,11 @@ describe("file operations", () => {
     await vault.newTab();
     await vault.openFile("a.md");
     vault.update("changed");
+    // Pending edits are saved before trashing, so the trash keeps them.
     await vault.trash("a.md");
+    expect(api.writeFile).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(400);
-    expect(api.writeFile).not.toHaveBeenCalled();
+    expect(api.writeFile).toHaveBeenCalledTimes(1);
   });
 
   it("own changes move the change counters of the panels", async () => {

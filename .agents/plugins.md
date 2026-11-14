@@ -13,7 +13,7 @@ Every function of dvoix hooks into the app through the `PluginContext`. The API 
 - `store.svelte.ts` loads store plugins from `.dvoix/plugins/<id>/` (`main.js` as an ES module via a blob URL) and manages `.dvoix/store.json`. The manager knows them through `plugins.loadExtra`/`unloadExtra`, not through `corePlugins`.
 - `api.ts` is the API for store plugins: the `PluginContext`, but with `mount(el, props)` instead of Svelte components, SVG text as icon, IDs prefixed with `<plugin-id>:`, and permissions (`vault:read`, `vault:write`, `editor`, `process`). If the `PluginContext` is extended, update it here and in `docs/plugins/README.md`.
 - New permission: add it to `PERMISSIONS` in `crates/dvoix-core/src/store.rs`, to the type `PluginPermission` in `src/lib/api.ts`, to `PERMISSION_LABELS` and to the docs.
-- Downloads only through `src-tauri/src/http.rs` (https, GitHub only), URLs only from `store::release_url`/`latest_manifest_url`.
+- Downloads only through `src-tauri/src/http.rs` (https, GitHub only), URLs only from `store::release_url`/`releases_url`. Plugin files only come from the release a registry entry pins, and are written only after `store::verify_release` checked them against the entry's SHA-256 (`store::install` does that itself). Never add a way to install unverified files.
 - Permissions are not a sandbox. Never pretend they are one, neither in the UI nor in the docs.
 
 ## Rules
@@ -23,7 +23,8 @@ Every function of dvoix hooks into the app through the `PluginContext`. The API 
 - Moving a function between the two keeps its `manifest.id`, so its settings in `.dvoix/plugins/<id>/data.json` and its command ids stay the same. A feature's old entry in `core-plugins.json` is ignored and dropped on the next save.
 - `manifest.id`: lowercase, `a-z0-9-`, stable. It is the folder name in `.dvoix/plugins/<id>/` and the key in `core-plugins.json`. Never rename an existing id, or users lose their settings.
 - `manifest.name` and `description` in English; the description is one sentence.
-- A plugin talks to the app **only** through the `ctx` from `onload`: `addPanel`, `addRightSidebar`, `addRibbonAction`, `addCommand`, `registerFileType`, `registerEditorExtension`, `addFileFooter`, `addPaneHeader`, `addOverlay`, `registerView`, `addExplorerEntries`, `addSettingTab`, `register`, `loadData`, `saveData`.
+- A plugin talks to the app **only** through the `ctx` from `onload`: `addPanel`, `addRightSidebar`, `addRibbonAction`, `addCommand`, `registerFileType`, `registerEditorExtension`, `addFileFooter`, `addPaneHeader`, `addOverlay`, `registerView`, `addExplorerEntries`, `addSettingTab`, `on`, `register`, `loadData`, `saveData`.
+- App events (`ctx.on`) are defined in `src/lib/events.ts` and emitted only by the app, right where it changes something (`vault.svelte.ts`, the store API's `vault.write`, pasted attachments). A new way to create, rename or delete files in the app emits the matching event. A new event goes into `AppEvents`, the store API (`api.ts`) and the docs.
 - Everything registered through `ctx` is removed automatically by the app when the plugin is turned off. What a plugin starts itself (listeners, timers, subscriptions) must be handed to `ctx.register(dispose)`. After switching off, nothing of the plugin may remain.
 - A core feature or plugin does not import anything from another one's folder. What several plugins need goes to `src/lib/` (e.g. `src/lib/tasks.ts`, `src/lib/fuzzy.ts`).
 - If a plugin needs something the API cannot do, extend the API in `types.ts` + `manager.svelte.ts` (with automatic cleanup) and add it to the plugin table in the README. No workarounds around the API.

@@ -19,7 +19,6 @@ import { classHighlighter, styleTags, tags as t } from "@lezer/highlight";
 import { livePreview } from "./livePreview";
 import { parseFrontmatter } from "./frontmatter";
 import { openLink } from "./propertiesWidget.svelte";
-import { editorStatus } from "../../editorStatus.svelte";
 
 const WIKILINK = /\[\[([^\]\n]+)\]\]/g;
 
@@ -139,6 +138,8 @@ export interface EditorOptions {
   onlink: (target: string) => void;
   /** Extra CodeMirror extensions, e.g. from plugins (task checkboxes) or settings (line numbers). */
   extensions?: Extension[];
+  /** Reports cursor and selection changes of the focused editor. */
+  onstatus?: (view: EditorView, state: EditorState) => void;
 }
 
 /** Holds the extensions from plugins and settings, so they can be swapped without a new editor. */
@@ -157,13 +158,7 @@ export function setLivePreview(view: EditorView, on: boolean): void {
   view.dispatch({ effects: preview.reconfigure(on ? livePreview() : []) });
 }
 
-function reportCursor(state: EditorState): void {
-  const head = state.selection.main.head;
-  const line = state.doc.lineAt(head);
-  editorStatus.setCursor(line.number, head - line.from + 1);
-}
-
-export function createMarkdownEditor({ parent, doc, onchange, onlink, extensions = [] }: EditorOptions): EditorView {
+export function createMarkdownEditor({ parent, doc, onchange, onlink, extensions = [], onstatus }: EditorOptions): EditorView {
   // The cursor starts below the properties: at the very start it would be
   // inside them, and the live preview would show the YAML instead.
   // Positions on the text as CodeMirror keeps it: with "\n" only.
@@ -193,7 +188,7 @@ export function createMarkdownEditor({ parent, doc, onchange, onlink, extensions
         preview.of([]),
         EditorView.updateListener.of((u) => {
           if (u.docChanged) onchange(u.state.doc.toString());
-          if (u.docChanged || u.selectionSet) reportCursor(u.state);
+          if (u.docChanged || u.selectionSet) onstatus?.(u.view, u.state);
         }),
         EditorView.domEventHandlers({
           mousedown(event, view) {
@@ -209,7 +204,6 @@ export function createMarkdownEditor({ parent, doc, onchange, onlink, extensions
       ],
     }),
   });
-  reportCursor(view.state);
   return view;
 }
 
@@ -218,7 +212,18 @@ export function setDoc(view: EditorView, doc: string): void {
   // CodeMirror keeps lines joined with "\n". A note with Windows line endings
   // would never compare equal, get replaced and saved again, so it showed up
   // as changed in git although nobody touched it.
-  if (view.state.doc.toString() === doc.replace(/\r\n?/g, "\n")) return;
-  const head = Math.min(view.state.selection.main.head, doc.length);
-  view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: doc }, selection: { anchor: head } });
+  const next = doc.replace(/\r\n?/g, "\n");
+  const current = view.state.doc.toString();
+  if (current === next) return;
+  let from = 0;
+  const shared = Math.min(current.length, next.length);
+  while (from < shared && current[from] === next[from]) from++;
+  let currentEnd = current.length;
+  let nextEnd = next.length;
+  while (currentEnd > from && nextEnd > from && current[currentEnd - 1] === next[nextEnd - 1]) {
+    currentEnd--;
+    nextEnd--;
+  }
+  const changes = view.state.changes({ from, to: currentEnd, insert: next.slice(from, nextEnd) });
+  view.dispatch({ changes, selection: view.state.selection.map(changes) });
 }

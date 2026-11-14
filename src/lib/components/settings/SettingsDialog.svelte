@@ -1,18 +1,15 @@
-<script module lang="ts">
-  /** Modal id of the settings dialog (`ui.modal`). */
-  export const SETTINGS = "settings";
-</script>
-
 <script lang="ts">
   // Settings (Ctrl+,): editor, appearance, keyboard shortcuts, core plugins on/off,
   // the plugin store, and one page per core feature or plugin that has settings. Everything is saved in `<vault>/.dvoix/`.
-  import { Check, FilePenLine, Info, Keyboard, Palette, Puzzle, RotateCcw, Store, X } from "@lucide/svelte";
+  import { Check, FilePenLine, Info, Keyboard, Palette, Pipette, Puzzle, RotateCcw, Store, X } from "@lucide/svelte";
   import Select from "../Select.svelte";
   import { focusTrap } from "../../focusTrap";
+  import CssSnippetsSection from "./CssSnippetsSection.svelte";
   import Setting from "./Setting.svelte";
+  import HotkeySettings from "./HotkeySettings.svelte";
   import StorePage from "./StorePage.svelte";
   import Toggle from "./Toggle.svelte";
-  import { hotkeyLabel, plugins, type Plugin } from "../../plugins";
+  import { hotkeyLabel, plugins, pluginStore, type Plugin } from "../../plugins";
   import {
     APPEARANCE_DEFAULTS,
     settings,
@@ -22,7 +19,8 @@
     type ThemeId,
     type ViewMode,
   } from "../../settings.svelte";
-  import { ui } from "../../ui.svelte";
+  import { ui, SETTINGS } from "../../ui.svelte";
+  import { hotkeys } from "../../hotkeys.svelte";
   import { updater } from "../../updater.svelte";
   import { vault } from "../../vault.svelte";
 
@@ -51,12 +49,6 @@
   const featurePages = $derived(pagesOf(plugins.features));
   const pluginPages = $derived(pagesOf([...plugins.all, ...plugins.extra]));
   const allPages = $derived([...featurePages, ...pluginPages]);
-  /** Everything that registered commands with shortcuts, core features first. */
-  const shortcutGroups = $derived(
-    [...plugins.features, ...plugins.all, ...plugins.extra]
-      .map((p) => ({ id: p.manifest.id, name: p.manifest.name, commands: commandsOf(p.manifest.id) }))
-      .filter((g) => g.commands.length),
-  );
   const activeTab = $derived(
     page.startsWith("plugin:") ? plugins.settingTabs.find((t) => `plugin:${t.pluginId}` === page) : undefined,
   );
@@ -71,6 +63,7 @@
   }
 
   function keydown(e: KeyboardEvent) {
+    if (hotkeys.capturing) return;
     if (e.key === "Escape") {
       e.preventDefault();
       close();
@@ -87,6 +80,10 @@
     settings.saveAppearance();
   }
 
+  function commandsOf(pluginId: string) {
+    return plugins.commands.filter((command) => command.pluginId === pluginId && plugins.hotkeysFor(command).length);
+  }
+
   function setSize(key: "fontSize" | "interfaceFontSize", raw: string) {
     const n = Number(raw);
     if (!Number.isFinite(n)) return;
@@ -94,8 +91,12 @@
     settings.saveAppearance();
   }
 
-  function commandsOf(pluginId: string) {
-    return plugins.commands.filter((c) => c.pluginId === pluginId && c.hotkeys?.length);
+  function setCustomAccent(raw: string) {
+    const trimmed = raw.trim();
+    if (!/^#[0-9a-fA-F]{6}$/.test(trimmed)) return;
+    settings.appearance.customAccentColor = trimmed.toLowerCase();
+    settings.appearance.accentColor = "custom";
+    settings.saveAppearance();
   }
 
   const navBtn = (active: boolean) =>
@@ -145,6 +146,11 @@
       <button class={navBtn(page === "store")} onclick={() => (page = "store")}>
         <Store size={14} strokeWidth={1.75} class={page === "store" ? "text-violet-400" : "text-zinc-500"} />
         <span class="truncate">Plugin store</span>
+        {#if pluginStore.updateCount}
+          <span class="ml-auto rounded-full bg-violet-600 px-1.5 text-[10px] leading-4 font-medium text-white" title="Plugin updates available">
+            {pluginStore.updateCount}
+          </span>
+        {/if}
       </button>
       {#if pluginPages.length}
         <div class="px-2.5 pt-4 pb-1 text-[11px] font-medium tracking-wide text-zinc-500 uppercase">Plugin options</div>
@@ -249,6 +255,36 @@
                   {/if}
                 </button>
               {/each}
+              <label
+                class="relative flex h-6 w-6 cursor-pointer items-center justify-center rounded-full border transition-transform hover:scale-110 {settings.appearance.accentColor === 'custom'
+                  ? 'border-zinc-100 ring-2 ring-zinc-500/40'
+                  : 'border-zinc-600'}"
+                style:background-color={settings.appearance.customAccentColor}
+                title="Custom accent color"
+                aria-label="Custom accent color"
+              >
+                <input
+                  type="color"
+                  class="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                  value={settings.appearance.customAccentColor}
+                  oninput={(e) => setCustomAccent(e.currentTarget.value)}
+                  onclick={() => {
+                    if (settings.appearance.accentColor !== "custom") setAppearance("accentColor", "custom");
+                  }}
+                />
+                <Pipette size={11} class="pointer-events-none text-white drop-shadow" />
+              </label>
+              {#if settings.appearance.accentColor === "custom"}
+                <input
+                  type="text"
+                  maxlength={7}
+                  spellcheck="false"
+                  aria-label="Custom accent hex color"
+                  class="w-20 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 font-mono text-xs text-zinc-200 outline-none focus:border-violet-500"
+                  value={settings.appearance.customAccentColor}
+                  oninput={(e) => setCustomAccent(e.currentTarget.value)}
+                />
+              {/if}
             </div>
           </Setting>
 
@@ -331,20 +367,9 @@
               {/if}
             </div>
           </Setting>
+          <CssSnippetsSection />
         {:else if page === "shortcuts"}
-          {#each shortcutGroups as g (g.id)}
-            <div class="pt-4 pb-1 text-[11px] font-medium tracking-wide text-zinc-500 uppercase">{g.name}</div>
-            {#each g.commands as c (c.fullId)}
-              <div class="flex items-center justify-between gap-4 border-b border-zinc-800/40 py-1.5 text-sm text-zinc-300 last:border-b-0">
-                <span class="truncate">{c.name}</span>
-                <span class="flex shrink-0 gap-1">
-                  {#each c.hotkeys! as h, i (i)}
-                    <kbd>{hotkeyLabel(h)}</kbd>
-                  {/each}
-                </span>
-              </div>
-            {/each}
-          {/each}
+          <HotkeySettings />
         {:else if page === "about"}
           <Setting name="Version" description="The running version of dvoix.">
             <span class="text-sm text-zinc-300 tabular-nums">{updater.appVersion || "dev"}</span>
@@ -407,7 +432,7 @@
             {#if on && commandsOf(id).length}
               <div class="-mt-2 flex flex-wrap gap-x-4 gap-y-1 pb-3 text-[11px] text-zinc-500">
                 {#each commandsOf(id) as c (c.fullId)}
-                  <span class="inline-flex items-center gap-1">{c.name}: <kbd>{hotkeyLabel(c.hotkeys![0])}</kbd></span>
+                  <span class="inline-flex items-center gap-1">{c.name}: <kbd>{hotkeyLabel(plugins.hotkeysFor(c)[0])}</kbd></span>
                 {/each}
               </div>
             {/if}

@@ -3,8 +3,10 @@
 // the app to render. Core features are always loaded; plugins can be turned off.
 import type { Extension } from "@codemirror/state";
 import { readJsonRaw, readJson, writeJson } from "../config";
+import { appEvents } from "../events";
 import { registerFileType } from "../filetypes";
 import { vault } from "../vault.svelte";
+import { hotkeys } from "../hotkeys.svelte";
 import type {
   CommandSpec,
   Dispose,
@@ -161,6 +163,7 @@ class PluginManager {
   /** Loads every core feature, then reads `core-plugins.json` and loads every plugin that is on. */
   async loadVault() {
     await this.serial(async () => {
+      await hotkeys.load();
       const saved = await readJsonRaw(ENABLED_FILE);
       this.enabled = saved && typeof saved === "object" ? (saved as Record<string, boolean>) : {};
       this.errors = {};
@@ -188,6 +191,7 @@ class PluginManager {
       for (const id of [...this.loaded].reverse()) await this.unload(id);
       this.extra = [];
       this.errors = {};
+      hotkeys.reset();
     });
   }
 
@@ -228,7 +232,12 @@ class PluginManager {
   run(fullId: string): boolean {
     const cmd = this.commandList.find((c) => c.fullId === fullId);
     if (!cmd || (cmd.when && !cmd.when())) return false;
-    void cmd.run();
+    try {
+      const result = cmd.run();
+      if (result instanceof Promise) result.catch((e) => (vault.error = String(e)));
+    } catch (e) {
+      vault.error = String(e);
+    }
     return true;
   }
 
@@ -239,8 +248,12 @@ class PluginManager {
   /** Finds the command bound to a key press, if any. */
   commandFor(e: KeyboardEvent, inModal: boolean): Command | undefined {
     return this.commandList.find(
-      (c) => (!inModal || c.inModal) && c.hotkeys?.some((h) => matches(h, e)) && (!c.when || c.when()),
+      (c) => (!inModal || c.inModal) && hotkeys.forCommand(c).some((h) => matches(h, e)) && (!c.when || c.when()),
     );
+  }
+
+  hotkeysFor(command: Command): Hotkey[] {
+    return hotkeys.forCommand(command);
   }
 
   // ------------------------------------------------------------------ internals
@@ -365,6 +378,7 @@ class PluginManager {
       },
       addExplorerEntries: (source) =>
         addTo(() => this.explorerEntryList, (v) => (this.explorerEntryList = v), { ...source, pluginId }, (s) => s.id),
+      on: (event, handler) => track(appEvents.on(event, handler)),
       register: (fn) => void track(fn),
       loadData: (defaults) => readJson(dataFile, defaults),
       saveData: (data) => writeJson(dataFile, data),

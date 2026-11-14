@@ -5,6 +5,7 @@ import type { Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { api } from "../../api";
 import { cleanFolder, folderOf } from "../../attachments";
+import { appEvents } from "../../events";
 import { vault } from "../../vault.svelte";
 import { attachmentSettings } from "./settings";
 
@@ -62,6 +63,7 @@ async function insertFiles(view: EditorView, files: File[], pos: number): Promis
   }
   if (!links.length) return;
   await vault.refresh();
+  for (const path of links) appEvents.emit("file-create", { path, isDir: false });
   // The short name is enough while it is unique in the vault; else the full path.
   const text = links
     .map((path) => {

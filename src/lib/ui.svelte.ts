@@ -7,12 +7,19 @@ import { readJsonRaw, writeJson } from "./config";
 /** Id of a side panel. Panels come from plugins, e.g. "file-explorer" or "tasks". */
 export type PanelId = string;
 
-/** Open tabs: file paths ("" = empty tab, `dvoix://view/<id>` = a plugin view) and the active index. */
+/** Modal id of the app settings dialog. */
+export const SETTINGS = "settings";
+
+/** Open tabs: file paths ("" = empty tab, `dvoix://view/<id>` = a plugin view), the active index, pins and split. */
 export interface SavedTabs {
   paths: string[];
   active: number;
   /** Recently opened files, newest first (for the quick switcher). */
   recent: string[];
+  /** Indices of pinned tabs. Missing means no pinned tabs (older workspaces). */
+  pinned?: number[];
+  /** Indices of the two visible tabs while the editor is split. */
+  split?: { left: number; right: number } | null;
 }
 
 interface Workspace {

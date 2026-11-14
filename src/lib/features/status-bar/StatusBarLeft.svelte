@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { editorStatus } from "../../editorStatus.svelte";
   import { fileTypeFor } from "../../filetypes";
   import { parseFrontmatter } from "../../filetypes/markdown/frontmatter";
   import { plugins } from "../../plugins";
@@ -43,6 +44,13 @@
     <span>{markdownStats.chars} {markdownStats.chars === 1 ? "character" : "characters"}</span>
     <span class="text-zinc-700" aria-hidden="true">·</span>
     <span>{markdownStats.readTime}</span>
+    {#if editorStatus.selection}
+      <span class="text-zinc-700" aria-hidden="true">·</span>
+      <span class="text-zinc-400">
+        {editorStatus.selection.words} {editorStatus.selection.words === 1 ? "word" : "words"}, {editorStatus.selection.chars}
+        {editorStatus.selection.chars === 1 ? "character" : "characters"} selected
+      </span>
+    {/if}
   </div>
 {:else if vault.openPath}
   <div class="flex items-center gap-2.5 tabular-nums">

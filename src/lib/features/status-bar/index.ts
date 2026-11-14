@@ -6,7 +6,7 @@ export const statusBarFeature: Plugin = {
   manifest: {
     id: "status-bar",
     name: "Status bar",
-    description: "Shows word count, reading time, cursor position, and view mode in the bottom bar.",
+    description: "Shows word count, selection, cursor position, save state, and view mode in the bottom bar.",
     version: "1.0.0",
   },
   onload(ctx) {

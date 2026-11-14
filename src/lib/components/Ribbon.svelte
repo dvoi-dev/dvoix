@@ -1,13 +1,13 @@
 <script lang="ts">
   // The thin icon bar on the far left, like Obsidian's ribbon. Its icons come
   // from plugins: one per side panel, plus plugin actions. Empty space moves
-  // the window, like the rest of the app's own title bar.
+  // the window, like the rest of the app's own title bar. A dot on the
+  // settings button says that store plugins have updates.
   import { ArrowLeftRight, Settings } from "@lucide/svelte";
-  import { plugins } from "../plugins";
-  import { ui } from "../ui.svelte";
+  import { plugins, pluginStore } from "../plugins";
+  import { ui, SETTINGS } from "../ui.svelte";
   import { vault } from "../vault.svelte";
   import { dragRegion } from "../window.svelte";
-  import { SETTINGS } from "./settings/SettingsDialog.svelte";
 
   const items = $derived(
     [
@@ -15,6 +15,9 @@
       ...plugins.ribbonActions.map((a) => ({ key: `action:${a.id}`, label: a.label, icon: a.icon, order: a.order ?? 100, panel: undefined, action: a.action })),
     ].sort((a, b) => a.order - b.order),
   );
+
+  const updates = $derived(pluginStore.updateCount);
+  const hint = $derived(updates ? ` · ${updates} plugin update${updates > 1 ? "s" : ""}` : "");
 
   const btn = "relative flex h-8 w-8 items-center justify-center rounded-md transition-colors";
   const idle = "text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200";
@@ -41,15 +44,23 @@
 
   <div class="my-1 h-px w-5 bg-zinc-800/80"></div>
 
-  <button class="{btn} {idle}" title="Open another vault" aria-label="Open another vault" onclick={() => vault.close()}>
+  <button
+    class="{btn} {idle}"
+    title="Open another vault"
+    aria-label="Open another vault"
+    onclick={() => void vault.close().catch(() => undefined)}
+  >
     <ArrowLeftRight size={18} strokeWidth={1.75} />
   </button>
   <button
     class="{btn} {ui.modal === SETTINGS ? 'bg-zinc-800/90 text-zinc-100' : idle}"
-    title="Settings (Ctrl+,)"
-    aria-label="Settings"
+    title="Settings (Ctrl+,){hint}"
+    aria-label="Settings{hint}"
     onclick={() => ui.toggleModal(SETTINGS)}
   >
     <Settings size={18} strokeWidth={1.75} />
+    {#if updates}
+      <span class="absolute top-1 right-1 h-2 w-2 rounded-full bg-violet-500 ring-2 ring-zinc-950"></span>
+    {/if}
   </button>
 </nav>

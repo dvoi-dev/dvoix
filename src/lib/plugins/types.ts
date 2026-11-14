@@ -6,6 +6,7 @@
 import type { Extension } from "@codemirror/state";
 import type { Component } from "svelte";
 import type { VaultEntry } from "../api";
+import type { AppEventHandler, AppEventName } from "../events";
 import type { FileType } from "../filetypes/types";
 
 /** Describes a plugin. For community plugins this would be their `manifest.json`. */
@@ -184,6 +185,12 @@ export interface PluginContext {
   /** More entries in the file explorer only, e.g. hidden folders. */
   addExplorerEntries(source: ExplorerEntriesSpec): Dispose;
   addSettingTab(tab: SettingTabSpec): Dispose;
+  /**
+   * Calls `handler` on an app event (see `AppEvents` in `src/lib/events.ts`):
+   * the active file changed, the editor saved, dvoix created, renamed or
+   * deleted something. Ends with the plugin.
+   */
+  on<K extends AppEventName>(event: K, handler: AppEventHandler<K>): Dispose;
   /** Runs `fn` when the plugin is turned off. */
   register(fn: Dispose): void;
 

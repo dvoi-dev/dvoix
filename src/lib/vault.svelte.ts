@@ -1,11 +1,15 @@
 // App state for the open vault and the open file, shared by all components.
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { untrack } from "svelte";
 import { api, onVaultChanged, type VaultChange, type VaultEntry, type VaultInfo } from "./api";
+import { appEvents } from "./events";
 import { creatableFileTypes, type FileType } from "./filetypes";
 import { flushConfig } from "./config";
 import { plugins } from "./plugins/manager.svelte";
 import { pluginStore } from "./plugins/store/store.svelte";
 import { settings } from "./settings.svelte";
+import { snippets } from "./snippets.svelte";
+import { toasts } from "./toast.svelte";
 import { ui } from "./ui.svelte";
 
 const SAVE_DELAY_MS = 400;
@@ -23,6 +27,25 @@ export interface Tab {
   id: number;
   path: string | null;
   view?: string;
+  pinned?: boolean;
+}
+
+export type PaneSide = "left" | "right";
+
+/** The two tabs shown side by side. Both stay in the same tab list. */
+export interface SplitView {
+  left: number;
+  right: number;
+}
+
+export type SaveState = "saved" | "pending" | "saving" | "error";
+
+/** One in-memory document per path, shared by every pane and tab showing it. */
+interface FileBuffer {
+  content: string;
+  dirty: boolean;
+  saveState: SaveState;
+  revision: number;
 }
 
 export interface OpenOptions {
@@ -56,6 +79,12 @@ export interface ChangeGroup {
   paths: string[];
 }
 
+/** One path of a batch of changes on disk and what happened to it. */
+export interface VaultChangeKind {
+  path: string;
+  kind: VaultChange["kind"];
+}
+
 /** True for a note: only notes are indexed, so only they change the panels of notes. */
 function isNote(path: string): boolean {
   return path.toLowerCase().endsWith(".md");
@@ -67,20 +96,52 @@ const newTabObj = (path: string | null, view?: string): Tab => ({ id: nextTabId+
 class VaultStore {
   info = $state<VaultInfo | null>(null);
   entries = $state<VaultEntry[]>([]);
-  /** Path of the file shown in the active tab (null for an empty tab). */
-  openPath = $state<string | null>(null);
-  /** Id of the view shown in the active tab instead of a file, if any. */
-  openView = $state<string | null>(null);
   tabs = $state<Tab[]>([]);
   activeTabId = $state(0);
+  split = $state<SplitView | null>(null);
+  focusedPane = $state<PaneSide>("left");
   /** Recently opened files, newest first. */
   recent = $state<string[]>([]);
-  content = $state("");
-  dirty = $state(false);
   error = $state<string | null>(null);
+  private buffers = $state<Record<string, FileBuffer>>({});
+  private saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private writeJobs = new Map<string, Promise<void>>();
+  private closingTabs = new Set<number>();
+  /** Invalidates pending tab reads when the user navigates somewhere else. */
+  private navigationId = 0;
   private navHistory = $state<HistoryEntry[]>([]);
   private navIndex = $state(-1);
   private navigatingHistory = false;
+
+  /** Path of the file shown in the active tab (null for an empty tab). */
+  get openPath(): string | null {
+    return this.activeTab?.path ?? null;
+  }
+
+  /** Id of the view shown in the active tab instead of a file, if any. */
+  get openView(): string | null {
+    return this.activeTab?.view ?? null;
+  }
+
+  get content(): string {
+    return this.contentFor(this.openPath);
+  }
+
+  get dirty(): boolean {
+    return !!this.openPath && !!this.buffers[this.openPath]?.dirty;
+  }
+
+  get saveState(): SaveState {
+    return this.saveStateFor(this.openPath);
+  }
+
+  contentFor(path: string | null): string {
+    return path ? (this.buffers[path]?.content ?? "") : "";
+  }
+
+  saveStateFor(path: string | null): SaveState {
+    return path ? (this.buffers[path]?.saveState ?? "saved") : "saved";
+  }
 
   get canGoBack(): boolean {
     return this.navIndex > 0;
@@ -105,6 +166,8 @@ class VaultStore {
   });
   /** Moves when the list of the vault changes, so that caches know they are stale. */
   entriesVersion = $state(0);
+  /** Moves whenever `.trash/` changes through in-app trash, restore, or delete operations. */
+  trashVersion = $state(0);
 
   /** The files of the vault by their path, for the lookups of links and of changes. */
   private fileByPath = $derived.by(() => {
@@ -128,27 +191,47 @@ class VaultStore {
   });
 
   /** Called with the paths of every batch of changes, for store plugins (`dvoix.vault.onChange`). */
-  private changeListeners = new Set<(paths: string[]) => void>();
+  private changeListeners = new Set<(paths: string[], changes: VaultChangeKind[]) => void>();
 
-  /** Calls `fn` with the vault-relative paths of every batch of changes; returns the unsubscribe. */
-  onChanges(fn: (paths: string[]) => void): () => void {
+  /**
+   * Calls `fn` with the vault-relative paths of every batch of changes on
+   * disk, and what happened to each; returns the unsubscribe.
+   */
+  onChanges(fn: (paths: string[], changes: VaultChangeKind[]) => void): () => void {
     this.changeListeners.add(fn);
     return () => {
       this.changeListeners.delete(fn);
     };
   }
 
-  private saveTimer: ReturnType<typeof setTimeout> | undefined;
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
   /** Our own recent writes, so their watcher echo does not read the file back. */
   private selfWrites: { path: string; size: number; modified: number; at: number }[] = [];
   private unlisten: (() => void) | undefined;
   private unlistenViews: (() => void) | undefined;
+  private stopActiveWatch: (() => void) | undefined;
+  /** What `active-file-change` last said, so it only fires on a real change. */
+  private announced: { path: string | null; view: string | null } | null = null;
   private tearingDown = false;
 
   async init() {
     this.unlisten?.();
     this.unlistenViews?.();
+    this.stopActiveWatch?.();
+    // Every way the active file changes (switching tabs, opening a link,
+    // renaming the open file, closing its tab) ends in `openPath`/`openView`,
+    // so watching those two catches all of them, once per change.
+    this.stopActiveWatch = $effect.root(() => {
+      $effect(() => {
+        if (!this.info || this.tearingDown) return;
+        const next = { path: this.openPath, view: this.openView };
+        untrack(() => {
+          if (this.announced && next.path === this.announced.path && next.view === this.announced.view) return;
+          this.announced = next;
+          appEvents.emit("active-file-change", next);
+        });
+      });
+    });
     this.unlistenViews = plugins.onViewRemoved((id) => {
       // When the whole vault closes, its tabs are dropped anyway (and saved before).
       if (!this.tearingDown) void this.closeTabsWhere((t) => t.view === id);
@@ -168,16 +251,17 @@ class VaultStore {
       await this.teardown();
       const info = await api.openVault(path);
       // Settings, workspace and plugins of this vault, all from `<vault>/.dvoix/`.
-      await Promise.all([settings.load(), ui.load(info.path)]);
-      this.openPath = null;
-      this.content = "";
-      this.dirty = false;
+      await Promise.all([settings.load(), ui.load(info.path), this.refresh()]);
+      await snippets.refresh();
+      this.tabs = [];
+      this.activeTabId = 0;
+      this.split = null;
+      this.focusedPane = "left";
+      this.buffers = {};
       this.error = null;
       await plugins.loadVault();
       await pluginStore.loadVault();
       this.info = info;
-      // The tabs need the list of the vault to drop vanished files: list first.
-      await this.refresh();
       await this.restoreTabs();
     } catch (e) {
       this.error = String(e);
@@ -192,10 +276,17 @@ class VaultStore {
 
   /** Saves everything of the open vault and unloads its plugins. */
   private async teardown() {
+    this.navigationId++;
     if (!this.info) return;
     this.selfWrites = [];
     await this.flush();
+    if (Object.values(this.buffers).some((buffer) => buffer.dirty)) {
+      this.error = "Some files could not be saved. Retry saving before closing the vault.";
+      throw new Error(this.error);
+    }
     ui.unload(); // stop saving the workspace: unloading plugins (e.g. tabs) must not change it
+    snippets.clear();
+    toasts.clear();
     await flushConfig();
     this.tearingDown = true;
     try {
@@ -208,12 +299,19 @@ class VaultStore {
     this.info = null;
     this.entries = [];
     this.entriesVersion++;
-    this.openPath = null;
-    this.openView = null;
+    this.trashVersion++;
     this.tabs = [];
+    this.activeTabId = 0;
+    this.split = null;
+    this.focusedPane = "left";
+    for (const timer of this.saveTimers.values()) clearTimeout(timer);
+    this.saveTimers.clear();
+    this.writeJobs.clear();
+    this.buffers = {};
     this.recent = [];
     this.navHistory = [];
     this.navIndex = -1;
+    this.closingTabs.clear();
   }
 
   async refresh(changed: string[] = []) {
@@ -280,7 +378,10 @@ class VaultStore {
     if (visible.length) this.applyChanges(visible);
     for (const change of changes) {
       if (change.kind === "removed") void this.closeIfGone(change.path);
-      else if (change.path === this.openPath && !this.dirty && !this.isSelfWrite(change)) void this.reloadOpenFile();
+      else if (change.kind === "modified") {
+        const buffer = this.buffers[change.path];
+        if (buffer && !buffer.dirty && !this.isSelfWrite(change)) void this.reloadBuffer(change.path);
+      }
     }
   }
 
@@ -315,10 +416,11 @@ class VaultStore {
     if (notePaths.length) this.note(this.changes.notes, notePaths);
     if (listAgain) this.scheduleRefresh(lastAdded);
     const paths = [...new Set(changes.map((c) => c.path))];
+    const kinds = changes.map((c) => ({ path: c.path, kind: c.kind }));
     for (const fn of this.changeListeners) {
       // A broken plugin must not stop the app's own panels from updating.
       try {
-        fn(paths);
+        fn(paths, kinds);
       } catch (e) {
         console.error(e);
       }
@@ -401,23 +503,77 @@ class VaultStore {
     return this.tabs.find((t) => t.id === this.activeTabId);
   }
 
+  paneTab(side: PaneSide): Tab | undefined {
+    if (!this.split) return side === "left" ? this.activeTab : undefined;
+    return this.tabs.find((t) => t.id === this.split![side]);
+  }
+
+  focusPane(side: PaneSide) {
+    if (!this.split) {
+      this.focusedPane = "left";
+      return;
+    }
+    const tab = this.paneTab(side);
+    if (!tab) return;
+    this.focusedPane = side;
+    if (this.activeTabId !== tab.id) void this.activateTab(tab.id);
+  }
+
+  private visibleTabWithPath(path: string): Tab | undefined {
+    if (this.split) {
+      const left = this.paneTab("left");
+      if (left?.path === path) return left;
+      const right = this.paneTab("right");
+      if (right?.path === path) return right;
+    }
+    return undefined;
+  }
+
+  private visibleTabWithView(view: string): Tab | undefined {
+    if (this.split) {
+      const left = this.paneTab("left");
+      if (left?.view === view) return left;
+      const right = this.paneTab("right");
+      if (right?.view === view) return right;
+    }
+    return undefined;
+  }
+
+  private showInFocusedPane(id: number) {
+    this.navigationId++;
+    this.activeTabId = id;
+    if (this.split) this.split = { ...this.split, [this.focusedPane]: id };
+  }
+
+  /** Flushes a tab before it is replaced; false when the edit must stay visible. */
+  private async flushBeforeReplace(tab: Tab, request: number): Promise<boolean> {
+    if (tab.path) await this.flush(tab.path);
+    if (request !== this.navigationId || !this.tabs.includes(tab)) return false;
+    return !(tab.path && this.buffers[tab.path]?.dirty);
+  }
+
   /**
    * Opens a file. If it is already open in a tab, that tab is activated.
-   * Otherwise it replaces the active tab's file, or gets a new tab with `newTab`.
+   * Otherwise it replaces the active unpinned tab, or gets a new tab with `newTab`.
    */
   async openFile(path: string, opts: OpenOptions = {}) {
-    const existing = this.tabs.find((t) => t.path === path);
+    const existing = this.visibleTabWithPath(path) ?? this.tabs.find((t) => t.path === path);
     if (existing) return this.activateTab(existing.id);
+    const request = ++this.navigationId;
     const content = await this.read(path);
-    if (content === null) return;
+    if (content === null || request !== this.navigationId) return;
     const active = this.activeTab;
-    if (active && !opts.newTab) {
-      active.path = path;
-      active.view = undefined;
+    if (active && !opts.newTab && !active.pinned && !(await this.flushBeforeReplace(active, request))) return;
+    const target = this.activeTab;
+    if (target && !opts.newTab && !target.pinned) {
+      const previous = target.path;
+      target.path = path;
+      target.view = undefined;
+      this.pruneBuffer(previous);
     } else {
       const tab = newTabObj(path);
-      this.tabs.splice(active ? this.tabs.indexOf(active) + 1 : this.tabs.length, 0, tab);
-      this.activeTabId = tab.id;
+      this.tabs.splice(target ? this.tabs.indexOf(target) + 1 : this.tabs.length, 0, tab);
+      this.showInFocusedPane(tab.id);
     }
     this.show(path, content);
   }
@@ -428,63 +584,118 @@ class VaultStore {
    */
   async openViewTab(id: string, opts: OpenOptions = {}) {
     if (!plugins.view(id)) return;
-    const existing = this.tabs.find((t) => t.view === id);
+    const existing = this.visibleTabWithView(id) ?? this.tabs.find((t) => t.view === id);
     if (existing) return this.activateTab(existing.id);
-    await this.flush();
+    const request = ++this.navigationId;
     const active = this.activeTab;
-    if (active && !opts.newTab) {
-      active.path = null;
-      active.view = id;
+    if (active && !opts.newTab && !active.pinned && !(await this.flushBeforeReplace(active, request))) return;
+    if (!plugins.view(id)) return;
+    const target = this.activeTab;
+    if (target && !opts.newTab && !target.pinned) {
+      const previous = target.path;
+      target.path = null;
+      target.view = id;
+      this.pruneBuffer(previous);
     } else {
       const tab = newTabObj(null, id);
-      this.tabs.splice(active ? this.tabs.indexOf(active) + 1 : this.tabs.length, 0, tab);
-      this.activeTabId = tab.id;
+      this.tabs.splice(target ? this.tabs.indexOf(target) + 1 : this.tabs.length, 0, tab);
+      this.showInFocusedPane(tab.id);
     }
     this.show(null, "", id);
   }
 
   async activateTab(id: number) {
     const tab = this.tabs.find((t) => t.id === id);
-    if (!tab || (id === this.activeTabId && tab.path === this.openPath && (tab.view ?? null) === this.openView)) return;
-    if (tab.view) {
-      await this.flush();
-      this.activeTabId = id;
-      return this.show(null, "", tab.view);
+    if (!tab) return;
+    const request = ++this.navigationId;
+    const path = tab.path;
+    let content: string | null = null;
+    if (path) {
+      const buffer = this.buffers[path];
+      if (buffer) content = buffer.content;
+      else {
+        content = await this.read(path);
+        if (request !== this.navigationId || !this.tabs.includes(tab) || tab.path !== path) return;
+        if (content === null) {
+          tab.path = null;
+          this.pruneBuffer(path);
+        }
+      }
     }
-    const content = tab.path ? await this.read(tab.path) : "";
-    if (content === null) tab.path = null; // file vanished: keep the tab, but empty
+    if (request !== this.navigationId || !this.tabs.includes(tab)) return;
+    if (this.split) {
+      if (id === this.split.left) this.focusedPane = "left";
+      else if (id === this.split.right) this.focusedPane = "right";
+      else this.split = { ...this.split, [this.focusedPane]: id };
+    }
     this.activeTabId = id;
-    this.show(tab.path, content ?? "");
+    if (tab.view) return this.show(null, "", tab.view);
+    if (!tab.path) return this.show(null, "");
+    return this.show(tab.path, content ?? this.contentFor(tab.path));
   }
 
   /** Opens an empty tab next to the active one. */
   async newTab() {
-    await this.flush();
     const active = this.activeTab;
     const tab = newTabObj(null);
     this.tabs.splice(active ? this.tabs.indexOf(active) + 1 : this.tabs.length, 0, tab);
-    this.activeTabId = tab.id;
+    this.showInFocusedPane(tab.id);
     this.show(null, "");
   }
 
   async closeTab(id: number) {
-    const i = this.tabs.findIndex((t) => t.id === id);
-    if (i < 0) return;
-    if (id !== this.activeTabId) {
-      this.tabs.splice(i, 1);
-      this.saveTabs();
-      return;
+    if (this.closingTabs.has(id)) return;
+    const tab = this.tabs.find((t) => t.id === id);
+    if (!tab) return;
+    this.closingTabs.add(id);
+    const request = ++this.navigationId;
+    try {
+      if (tab.path) await this.flush(tab.path);
+      const index = this.tabs.findIndex((t) => t.id === id);
+      if (index < 0 || request !== this.navigationId) return;
+      const current = this.tabs[index];
+      if (current.path && this.buffers[current.path]?.dirty) return;
+      const splitSide = this.split ? (this.split.left === id ? "left" : this.split.right === id ? "right" : null) : null;
+      const wasActive = id === this.activeTabId;
+      this.tabs.splice(index, 1);
+      this.pruneBuffer(current.path);
+      if (splitSide && this.split) {
+        const otherId = splitSide === "left" ? this.split.right : this.split.left;
+        this.split = null;
+        this.focusedPane = "left";
+        const other = this.tabs.find((t) => t.id === otherId);
+        if (other) await this.activateTab(other.id);
+        else await this.newTab();
+      } else if (wasActive) {
+        const next = this.tabs[index] ?? this.tabs[index - 1];
+        if (next) await this.activateTab(next.id);
+        else await this.newTab();
+      } else {
+        this.saveTabs();
+      }
+    } finally {
+      this.closingTabs.delete(id);
     }
-    await this.flush();
-    const next = this.tabs[i + 1] ?? this.tabs[i - 1];
-    this.tabs.splice(i, 1);
-    if (next) await this.activateTab(next.id);
-    else await this.newTab();
   }
 
   async closeOtherTabs(id: number) {
+    const target = this.tabs.find((t) => t.id === id);
+    if (!target) return;
     await this.activateTab(id);
-    this.tabs = this.tabs.filter((t) => t.id === id);
+    const request = ++this.navigationId;
+    const paths = [...new Set(this.tabs.filter((t) => t.id !== id && !t.pinned && t.path).map((t) => t.path!))];
+    await Promise.all(paths.map((path) => this.flush(path)));
+    if (request !== this.navigationId || !this.tabs.includes(target)) return;
+    const keep = new Set(
+      this.tabs.filter((t) => t.id === id || t.pinned || (t.path && this.buffers[t.path]?.dirty)).map((t) => t.id),
+    );
+    const removed = this.tabs.filter((t) => !keep.has(t.id));
+    this.tabs = this.tabs.filter((t) => keep.has(t.id));
+    for (const tab of removed) this.pruneBuffer(tab.path);
+    if (this.split && (!keep.has(this.split.left) || !keep.has(this.split.right))) {
+      this.split = null;
+      this.focusedPane = "left";
+    }
     this.saveTabs();
   }
 
@@ -505,9 +716,75 @@ class VaultStore {
     this.saveTabs();
   }
 
-  /** Flushes the current file and reads `path`; null (and an error message) if that fails. */
+  togglePin(id = this.activeTabId) {
+    const tab = this.tabs.find((t) => t.id === id);
+    if (!tab || (!tab.path && !tab.view)) return;
+    tab.pinned = !tab.pinned;
+    this.saveTabs();
+  }
+
+  private async ensureTabBuffer(tab: Tab, request = this.navigationId): Promise<boolean> {
+    const path = tab.path;
+    if (!path || this.buffers[path]) return this.tabs.includes(tab);
+    const content = await this.read(path);
+    if (request !== this.navigationId || !this.tabs.includes(tab) || tab.path !== path) return false;
+    if (content === null) {
+      tab.path = null;
+      this.pruneBuffer(path);
+      return false;
+    }
+    if (!this.buffers[path]) this.buffers[path] = { content, dirty: false, saveState: "saved", revision: 0 };
+    return true;
+  }
+
+  /** Shows a tab on the right. Without a split, the target tab is kept on the left. */
+  async splitRight(id = this.activeTabId) {
+    const target = this.tabs.find((t) => t.id === id);
+    if (!target) return;
+    const request = ++this.navigationId;
+    await this.ensureTabBuffer(target, request);
+    if (request !== this.navigationId || !this.tabs.includes(target)) return;
+    if (!this.split) {
+      const copy = newTabObj(target.path, target.view);
+      this.tabs.splice(this.tabs.indexOf(target) + 1, 0, copy);
+      this.split = { left: target.id, right: copy.id };
+      this.focusedPane = "right";
+      this.activeTabId = copy.id;
+      this.show(copy.path, this.contentFor(copy.path), copy.view ?? null);
+      return;
+    }
+    if (id === this.split.right) {
+      this.focusPane("right");
+      return;
+    }
+    let rightId = id;
+    if (id === this.split.left) {
+      const copy = newTabObj(target.path, target.view);
+      this.tabs.splice(this.tabs.indexOf(target) + 1, 0, copy);
+      rightId = copy.id;
+    }
+    this.split = { ...this.split, right: rightId };
+    this.focusedPane = "right";
+    this.activeTabId = rightId;
+    const right = this.tabs.find((t) => t.id === rightId)!;
+    this.show(right.path, this.contentFor(right.path), right.view ?? null);
+  }
+
+  async closeSplit() {
+    if (!this.split) return;
+    this.navigationId++;
+    const leftId = this.split.left;
+    this.split = null;
+    this.focusedPane = "left";
+    const left = this.tabs.find((t) => t.id === leftId);
+    if (left) await this.activateTab(left.id);
+    else this.saveTabs();
+  }
+
+  /** Reads `path` from its shared buffer or from disk; null if that fails. */
   private async read(path: string): Promise<string | null> {
-    await this.flush();
+    const buffer = this.buffers[path];
+    if (buffer) return buffer.content;
     try {
       return await api.readFile(path);
     } catch (e) {
@@ -518,13 +795,8 @@ class VaultStore {
 
   /** Makes `path` (or the view `view`) the content of the active tab. */
   private show(path: string | null, content: string, view: string | null = null) {
-    clearTimeout(this.saveTimer);
-    this.openPath = path;
-    this.openView = view;
-    this.content = content;
-    this.dirty = false;
+    if (path && !this.buffers[path]) this.buffers[path] = { content, dirty: false, saveState: "saved", revision: 0 };
     if (path) {
-      this.error = null;
       this.recent = [path, ...this.recent.filter((p) => p !== path)].slice(0, RECENT_MAX);
       ui.reveal(path);
     }
@@ -578,15 +850,25 @@ class VaultStore {
   }
 
   private saveTabs() {
+    const pinned = this.tabs.flatMap((tab, index) => (tab.pinned ? [index] : []));
+    const split = this.split
+      ? {
+          left: this.tabs.findIndex((tab) => tab.id === this.split!.left),
+          right: this.tabs.findIndex((tab) => tab.id === this.split!.right),
+        }
+      : null;
     ui.saveTabs({
       paths: this.tabs.map((t) => (t.view ? VIEW_PREFIX + t.view : (t.path ?? ""))),
       active: Math.max(0, this.tabs.findIndex((t) => t.id === this.activeTabId)),
       recent: this.recent,
+      pinned,
+      split: split && split.left >= 0 && split.right >= 0 && split.left !== split.right ? split : null,
     });
   }
 
   /** Reopens the tabs the vault had when the app was last closed. */
   private async restoreTabs() {
+    const request = ++this.navigationId;
     const saved = ui.savedTabs();
     const files = new Set(this.entries.filter((e) => !e.isDir).map((e) => e.path));
     const view = (p: string) => (p.startsWith(VIEW_PREFIX) ? p.slice(VIEW_PREFIX.length) : undefined);
@@ -594,11 +876,45 @@ class VaultStore {
     const keep = (p: string) => !p || files.has(p) || !!plugins.view(view(p) ?? "");
     const paths = saved?.paths ?? [];
     this.recent = (saved?.recent ?? []).filter((p) => files.has(p));
-    this.tabs = paths.filter(keep).map((p) => (view(p) ? newTabObj(null, view(p)) : newTabObj(p || null)));
+    this.split = null;
+    this.focusedPane = "left";
+    const indexMap: number[] = [];
+    this.tabs = [];
+    paths.forEach((path, original) => {
+      if (!keep(path)) return;
+      indexMap[original] = this.tabs.length;
+      this.tabs.push(view(path) ? newTabObj(null, view(path)) : newTabObj(path || null));
+    });
     if (!this.tabs.length) this.tabs = [newTabObj(null)];
+    for (const original of saved?.pinned ?? []) {
+      const index = indexMap[original];
+      if (index !== undefined) this.tabs[index].pinned = true;
+    }
     // The previously active tab, or the closest one left of it if its file is gone.
     const before = paths.slice(0, (saved?.active ?? 0) + 1).filter(keep).length;
-    const tab = this.tabs[Math.max(0, before - 1)];
+    let tab = this.tabs[Math.max(0, before - 1)];
+    if (saved?.split) {
+      const left = indexMap[saved.split.left];
+      const right = indexMap[saved.split.right];
+      if (left !== undefined && right !== undefined && left !== right) {
+        const leftReady = await this.ensureTabBuffer(this.tabs[left], request);
+        const rightReady = await this.ensureTabBuffer(this.tabs[right], request);
+        if (request !== this.navigationId) return;
+        if (leftReady && rightReady) {
+          this.split = { left: this.tabs[left].id, right: this.tabs[right].id };
+          const active = indexMap[saved.active ?? 0];
+          if (active === right) {
+            tab = this.tabs[right];
+            this.focusedPane = "right";
+          } else {
+            tab = this.tabs[left];
+          }
+        } else {
+          tab = leftReady ? this.tabs[left] : rightReady ? this.tabs[right] : this.tabs[0];
+        }
+      }
+    }
+    if (request !== this.navigationId) return;
     this.activeTabId = 0;
     await this.activateTab(tab.id);
   }
@@ -622,20 +938,24 @@ class VaultStore {
 
   /** Closes the tabs matching `close`; the active one hands over to its neighbour. */
   private async closeTabsWhere(close: (tab: Tab) => boolean) {
-    if (!this.tabs.some(close)) return this.saveTabs();
+    const matching = this.tabs.filter(close);
+    if (!matching.length) return this.saveTabs();
     const active = this.activeTab;
     const activeGone = !!active && close(active);
-    if (activeGone) {
-      clearTimeout(this.saveTimer);
-      this.dirty = false;
-      this.openPath = null;
-      this.openView = null;
-    }
     const i = active ? this.tabs.indexOf(active) : -1;
     const left = this.tabs.slice(0, i).reverse();
     const right = this.tabs.slice(i + 1);
-    const next = [...right, ...left].find((t) => !close(t));
+    const splitSurvivor = this.split
+      ? [this.paneTab("left"), this.paneTab("right")].find((tab) => tab && !close(tab))
+      : undefined;
+    const next = splitSurvivor ?? [...right, ...left].find((t) => !close(t));
     this.tabs = this.tabs.filter((t) => !close(t));
+    await Promise.all(matching.map((tab) => (tab.path ? this.writeJobs.get(tab.path) : undefined)));
+    for (const tab of matching) if (tab.path) this.discardBuffer(tab.path);
+    if (this.split && (!this.tabs.some((t) => t.id === this.split!.left) || !this.tabs.some((t) => t.id === this.split!.right))) {
+      this.split = null;
+      this.focusedPane = "left";
+    }
     if (!activeGone) return this.saveTabs();
     if (next) await this.activateTab(next.id);
     else {
@@ -646,12 +966,16 @@ class VaultStore {
 
   /** A file was removed on disk: close its tabs if it is really gone (not just rewritten). */
   private async closeIfGone(path: string) {
-    if (!this.tabs.some((t) => t.path === path)) return;
+    const gone = (candidate: string) => candidate === path || candidate.startsWith(`${path}/`);
+    if (!this.tabs.some((t) => !!t.path && gone(t.path)) && !Object.keys(this.buffers).some(gone)) return;
     const exists = await api.readFile(path).then(
       () => true,
       () => false,
     );
-    if (!exists) await this.closeTabs((p) => p === path);
+    if (!exists) {
+      for (const buffered of Object.keys(this.buffers)) if (gone(buffered)) this.discardBuffer(buffered);
+      await this.closeTabs(gone);
+    }
   }
 
   // ---------------------------------------------------------------- files
@@ -680,35 +1004,134 @@ class VaultStore {
   }
 
   /** Called by file-type views on every edit; saves shortly after typing stops. */
-  update(content: string) {
-    if (content === this.content) return;
-    this.content = content;
-    this.dirty = true;
-    clearTimeout(this.saveTimer);
-    this.saveTimer = setTimeout(() => void this.flush(), SAVE_DELAY_MS);
+  update(content: string, path = this.openPath) {
+    if (!path) return;
+    let buffer = this.buffers[path];
+    if (!buffer) {
+      buffer = { content, dirty: false, saveState: "saved", revision: 0 };
+      this.buffers[path] = buffer;
+    }
+    if (content === buffer.content) return;
+    buffer.content = content;
+    buffer.dirty = true;
+    buffer.saveState = "pending";
+    buffer.revision++;
+    this.scheduleSave(path);
   }
 
-  async flush() {
-    clearTimeout(this.saveTimer);
-    if (!this.dirty || !this.openPath) return;
-    const path = this.openPath;
-    const content = this.content;
-    try {
-      const entry = await api.writeFile(path, content);
-      // Remember our write, so its watcher echo does not read the file back.
-      this.noteWritten(entry);
-      if (this.openPath === path && this.content === content) this.dirty = false;
-    } catch (e) {
-      this.error = `Saving failed: ${e}`;
+  private scheduleSave(path: string) {
+    clearTimeout(this.saveTimers.get(path));
+    this.saveTimers.set(
+      path,
+      setTimeout(() => {
+        this.saveTimers.delete(path);
+        void this.flush(path);
+      }, SAVE_DELAY_MS),
+    );
+  }
+
+  /** Saves one buffer, or every pending buffer when no path is given. */
+  async flush(path?: string | null): Promise<void> {
+    if (path === undefined) {
+      await Promise.all(Object.keys(this.buffers).map((buffered) => this.flush(buffered)));
+      return;
+    }
+    if (!path) return;
+    for (;;) {
+      const timer = this.saveTimers.get(path);
+      if (timer) {
+        clearTimeout(timer);
+        this.saveTimers.delete(path);
+      }
+      const buffer = this.buffers[path];
+      if (!buffer?.dirty) return;
+      const job = this.writeJobs.get(path);
+      if (job) {
+        await job;
+        continue;
+      }
+      const revision = buffer.revision;
+      const content = buffer.content;
+      buffer.saveState = "saving";
+      const task = (async () => {
+        try {
+          const entry = await api.writeFile(path, content);
+          // Remember our write, so its watcher echo does not read the file back.
+          this.noteWritten(entry);
+          appEvents.emit("file-save", { path });
+          if (this.buffers[path] === buffer && buffer.revision === revision) {
+            buffer.dirty = false;
+            buffer.saveState = "saved";
+            this.pruneBuffer(path);
+          }
+        } catch (e) {
+          if (this.buffers[path] === buffer) {
+            buffer.dirty = true;
+            buffer.saveState = "error";
+          }
+          this.error = `Saving failed: ${e}`;
+        } finally {
+          this.writeJobs.delete(path);
+        }
+      })();
+      this.writeJobs.set(path, task);
+      await task;
+      if (this.buffers[path] !== buffer || buffer.revision === revision) return;
     }
   }
 
-  private async reloadOpenFile() {
-    const path = this.openPath;
-    if (!path) return;
+  private pruneBuffer(path: string | null) {
+    if (!path || this.tabs.some((tab) => tab.path === path) || this.buffers[path]?.dirty) return;
+    this.discardBuffer(path);
+  }
+
+  private hasDirty(match: (path: string) => boolean): boolean {
+    return Object.entries(this.buffers).some(([path, buffer]) => buffer.dirty && match(path));
+  }
+
+  private discardBuffer(path: string) {
+    clearTimeout(this.saveTimers.get(path));
+    this.saveTimers.delete(path);
+    delete this.buffers[path];
+  }
+
+  private async reloadBuffer(path: string) {
+    const buffer = this.buffers[path];
+    if (!buffer || buffer.dirty) return;
+    const revision = buffer.revision;
     const fresh = await api.readFile(path).catch(() => null);
-    // The tab may have moved on while the file was read.
-    if (this.openPath === path && fresh !== null && fresh !== this.content && !this.dirty) this.content = fresh;
+    const current = this.buffers[path];
+    if (fresh !== null && current === buffer && !current.dirty && current.revision === revision && current.content !== fresh) {
+      current.content = fresh;
+      current.saveState = "saved";
+    }
+  }
+
+  /**
+   * Writes `content` to `path` for a plugin (`dvoix.vault.write`), creating
+   * the file if it does not exist yet.
+   */
+  async writePluginFile(path: string, content: string): Promise<void> {
+    if (!this.entryAt(path)) {
+      try {
+        const entry = await api.createFile(path, content);
+        if (!entry.path.split("/").some((p) => p.startsWith("."))) {
+          this.insertEntry(entry);
+          this.appliedOwnChange([entry.path], isNote(entry.path));
+        }
+        appEvents.emit("file-create", { path: entry.path, isDir: false });
+        return;
+      } catch (e) {
+        if (!String(e).startsWith("path already exists:")) throw e;
+      }
+    }
+    const entry = await api.writeFile(path, content);
+    const found = this.fileByPath.get(entry.path.toLowerCase());
+    if (found) {
+      found.size = entry.size;
+      found.modified = entry.modified;
+      this.entriesVersion++;
+    }
   }
 
   creatable(): FileType[] {
@@ -733,6 +1156,7 @@ class VaultStore {
       // the same name again, and the tree works without watcher events.
       this.insertEntry(entry);
       this.appliedOwnChange([path], isNote(path));
+      appEvents.emit("file-create", { path, isDir: false });
       await this.openFile(path, opts);
     } catch (e) {
       this.error = String(e);
@@ -749,6 +1173,7 @@ class VaultStore {
       // The row exists right away, so the inline rename has something to edit.
       this.insertEntry(entry);
       this.appliedOwnChange([entry.path], true);
+      appEvents.emit("file-create", { path: entry.path, isDir: true });
       if (parent) ui.reveal(`${prefix}${name}`);
       return `${prefix}${name}`;
     } catch (e) {
@@ -759,20 +1184,36 @@ class VaultStore {
   async rename(from: string, newName: string) {
     const parent = from.includes("/") ? from.slice(0, from.lastIndexOf("/") + 1) : "";
     if (!newName.trim()) return;
-    await this.moveTo(from, `${parent}${newName.trim()}`);
+    await this.moveTo(from, `${parent}${newName.trim()}`, { verb: "rename" });
   }
 
   /** Moves a file or folder into another folder ("" = vault root), e.g. by drag & drop. */
   async move(from: string, folder: string) {
     const name = from.split("/").pop()!;
     if (folder === from || folder.startsWith(`${from}/`)) return; // not into itself
-    await this.moveTo(from, folder ? `${folder}/${name}` : name);
+    const to = folder ? `${folder}/${name}` : name;
+    if (to === from) return;
+    await this.moveTo(from, to, { verb: "move" });
   }
 
-  private async moveTo(from: string, to: string) {
-    if (to === from) return;
+  private async undoMove(from: string, to: string) {
+    const ok = await this.moveTo(from, to, { undo: false });
+    if (!ok && this.error) toasts.error(this.error);
+  }
+
+  private async moveTo(
+    from: string,
+    to: string,
+    opts: { undo?: boolean; verb?: "move" | "rename" } = {},
+  ): Promise<boolean> {
+    if (to === from) return true;
     try {
       await this.flush();
+      const affected = (path: string) => path === from || path.startsWith(`${from}/`);
+      if (this.hasDirty(affected)) {
+        this.error = "Some files could not be saved. Retry saving before moving them.";
+        return false;
+      }
       const entry = await api.renameEntry(from, to);
       const remap = (p: string) => (p === from ? to : p.startsWith(`${from}/`) ? to + p.slice(from.length) : p);
       // The entries move with the file right away: the tree, the link lookups
@@ -792,8 +1233,11 @@ class VaultStore {
       // back over the editor.
       this.noteSelfWrite({ ...entry, path: to });
       ui.moved(from, to);
-      if (this.openPath) this.openPath = remap(this.openPath);
       for (const t of this.tabs) if (t.path) t.path = remap(t.path);
+      const movedBuffers: Record<string, FileBuffer> = {};
+      for (const [path, buffer] of Object.entries(this.buffers)) movedBuffers[remap(path)] = buffer;
+      this.buffers = movedBuffers;
+      for (const [path, buffer] of Object.entries(this.buffers)) if (buffer.dirty) this.scheduleSave(path);
       this.recent = this.recent.map(remap);
       this.navHistory = this.navHistory.map((h) => (h.path ? { ...h, path: remap(h.path) } : h));
       this.saveTabs();
@@ -802,31 +1246,84 @@ class VaultStore {
         [...movedPaths, ...movedPaths.map(remap)],
         movedEntries.some((e) => e.isDir || isNote(e.path)),
       );
+      appEvents.emit("file-rename", { from, to, isDir: entry.isDir });
+      if (opts.undo !== false) {
+        const oldName = from.split("/").pop() ?? from;
+        const newName = to.split("/").pop() ?? to;
+        const destFolder = to.includes("/") ? to.slice(0, to.lastIndexOf("/")) : "";
+        const message =
+          opts.verb === "rename"
+            ? `Renamed "${oldName}" to "${newName}"`
+            : `Moved "${oldName}" to ${destFolder ? `"${destFolder}"` : "vault root"}`;
+        toasts.undo(message, () => this.undoMove(to, from));
+      }
+      return true;
+    } catch (e) {
+      this.error = String(e);
+      return false;
+    }
+  }
+
+  async trash(path: string, opts: { undo?: boolean } = {}) {
+    try {
+      await this.flush();
+      const wasActiveFile = this.openPath === path;
+      const gone = (candidate: string) => candidate === path || candidate.startsWith(`${path}/`);
+      if (this.hasDirty(gone)) {
+        this.error = "Some files could not be saved. Retry saving before deleting them.";
+        return;
+      }
+      const trashed = await api.trashEntry(path);
+      this.trashVersion++;
+      // Don't let a pending save recreate the file after it was trashed.
+      for (const buffered of Object.keys(this.buffers)) if (gone(buffered)) this.discardBuffer(buffered);
+      // The entry goes right away; a new note may take its name again.
+      const removed = this.entries.filter((e) => e.path === path || e.path.startsWith(`${path}/`));
+      this.removeEntries(path);
+      await this.closeTabs(gone);
+      this.appliedOwnChange(
+        removed.length ? removed.map((e) => e.path) : [path],
+        removed.some((e) => e.isDir || isNote(e.path)),
+      );
+      appEvents.emit("file-delete", { path, isDir: removed.some((e) => e.path === path && e.isDir) });
+      if (opts.undo !== false) {
+        const label = path.split("/").pop() ?? path;
+        toasts.undo(`Moved "${label}" to trash`, async () => {
+          try {
+            await this.restoreTrash(trashed.name, trashed.originalPath, { reopenIfFile: wasActiveFile });
+          } catch (e) {
+            toasts.error(String(e));
+          }
+        });
+      }
     } catch (e) {
       this.error = String(e);
     }
   }
 
-  async trash(path: string) {
-    try {
-      const p = this.openPath;
-      if (p === path || p?.startsWith(`${path}/`)) {
-        // Don't let a pending save recreate the file after it was trashed.
-        clearTimeout(this.saveTimer);
-        this.dirty = false;
-      }
-      await api.trashEntry(path);
-      // The entry goes right away; a new note may take its name again.
-      const removed = this.entries.filter((e) => e.path === path || e.path.startsWith(`${path}/`));
-      this.removeEntries(path);
-      await this.closeTabs((p) => p === path || p.startsWith(`${path}/`));
-      this.appliedOwnChange(
-        removed.length ? removed.map((e) => e.path) : [path],
-        removed.some((e) => e.isDir || isNote(e.path)),
-      );
-    } catch (e) {
-      this.error = String(e);
-    }
+  async restoreTrash(
+    trashName: string,
+    target: string | null = null,
+    opts: { renameOnConflict?: boolean; reopenIfFile?: boolean } = {},
+  ): Promise<VaultEntry> {
+    const entry = await api.restoreTrashEntry(trashName, target, opts.renameOnConflict ?? false);
+    this.trashVersion++;
+    await this.refresh([entry.path]);
+    this.note(this.changes.files, [entry.path]);
+    if (entry.isDir || isNote(entry.path)) this.note(this.changes.notes, [entry.path]);
+    if (entry.path.includes("/")) ui.reveal(entry.path);
+    if (opts.reopenIfFile && !entry.isDir) await this.openFile(entry.path);
+    return entry;
+  }
+
+  async deleteTrashed(trashName: string) {
+    await api.deleteTrashEntry(trashName);
+    this.trashVersion++;
+  }
+
+  async emptyTrash() {
+    await api.emptyTrash();
+    this.trashVersion++;
   }
 }
 

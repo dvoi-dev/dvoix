@@ -14,6 +14,7 @@ notify = "8"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 serde_yaml_ng = "0.10"
+sha2 = "0.11"
 walkdir = "2"
 
 [dev-dependencies]
