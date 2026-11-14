@@ -10,6 +10,8 @@ export interface FileViewProps {
   onchange: (content: string) => void;
   /** Open another file of the vault (e.g. when following a link). */
   onopen: (path: string) => void;
+  /** Whether this view belongs to the focused editor pane. */
+  focused?: boolean;
 }
 
 /**

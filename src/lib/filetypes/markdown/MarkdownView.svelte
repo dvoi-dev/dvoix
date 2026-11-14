@@ -10,7 +10,7 @@
   import { plugins } from "../../plugins/manager.svelte";
   import { settings } from "../../settings.svelte";
 
-  let { path, content, onchange, onopen }: FileViewProps = $props();
+  let { path, content, onchange, onopen, focused = true }: FileViewProps = $props();
 
   let host: HTMLDivElement | undefined = $state();
   let view: EditorView | undefined = $state();
@@ -34,9 +34,9 @@
   // The editor only exists while the note is edited; the reading view needs none.
   $effect(() => {
     if (mode === "read") {
+      if (view) editorStatus.clear(view);
       view?.destroy();
       view = undefined;
-      editorStatus.clear();
       return;
     }
     if (!host || view) return;
@@ -52,8 +52,12 @@
       },
       onlink: (target) => onopen(target),
       extensions,
+      onstatus: (editor, state) => editorStatus.report(editor, state),
     });
-    view.focus();
+    if (focused) {
+      editorStatus.activate(view);
+      view.focus();
+    }
     showRequestedLine();
   });
 
@@ -61,6 +65,15 @@
   $effect(() => {
     const live = mode === "edit";
     if (view) setLivePreview(view, live);
+  });
+
+  // Moving between split panes updates the status bar without stealing focus
+  // from a header button or the search panel. An unfocused pane must not keep
+  // reporting its cursor while the other pane shows a non-editor file.
+  $effect(() => {
+    if (!view) return;
+    if (focused) editorStatus.activate(view);
+    else editorStatus.clear(view);
   });
 
   // A plugin or setting changed: swap the extensions in place.
@@ -76,6 +89,7 @@
     const text = content;
     if (!view || text === editorText) return;
     setDoc(view, text);
+    editorText = text;
   });
 
   // Another panel (e.g. tasks or the outline) asked to show a line of this file.
@@ -85,8 +99,8 @@
   });
 
   onMount(() => () => {
+    if (view) editorStatus.clear(view);
     view?.destroy();
-    editorStatus.clear();
   });
 
   /** Gives an edited note back the line endings of the file, so only the edited lines change on disk. */
@@ -105,6 +119,6 @@
   {#if mode === "read"}
     <ReadingView {path} {content} {onchange} {onopen} />
   {:else}
-    <div class="h-full overflow-hidden" bind:this={host}></div>
+    <div class="h-full overflow-hidden" bind:this={host} onfocusin={() => view && editorStatus.activate(view)}></div>
   {/if}
 </div>

@@ -13,6 +13,8 @@ import { linkSuggestFeature } from "./link-suggest";
 import { checkboxesFeature } from "./checkboxes";
 import { attachmentsFeature } from "./attachments";
 import { quickSwitcherFeature } from "./quick-switcher";
+import { commandPaletteFeature } from "./command-palette";
+import { documentSearchFeature } from "./document-search";
 import { tabsFeature } from "./tabs";
 import { editorModesFeature } from "./editor-modes";
 import { statusBarFeature } from "./status-bar";
@@ -27,6 +29,8 @@ export const coreFeatures: Plugin[] = [
   checkboxesFeature,
   attachmentsFeature,
   quickSwitcherFeature,
+  commandPaletteFeature,
+  documentSearchFeature,
   tabsFeature,
   editorModesFeature,
   statusBarFeature,

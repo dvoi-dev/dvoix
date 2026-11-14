@@ -15,6 +15,15 @@ export const tabsFeature: Plugin = {
     ctx.addPaneHeader({ id: "tab-bar", component: TabBar });
     ctx.addCommand({ id: "new", name: "New tab", hotkeys: [{ mod: true, key: "t" }], run: () => vault.newTab() });
     ctx.addCommand({ id: "close", name: "Close tab", hotkeys: [{ mod: true, key: "w" }], run: () => vault.closeTab(vault.activeTabId) });
+    ctx.addCommand({ id: "pin", name: "Pin/unpin tab", when: () => !!vault.activeTab, run: () => vault.togglePin() });
+    ctx.addCommand({
+      id: "split",
+      name: "Split right",
+      hotkeys: [{ mod: true, key: "\\" }],
+      when: () => !!vault.activeTab,
+      run: () => vault.splitRight(),
+    });
+    ctx.addCommand({ id: "close-split", name: "Close split", when: () => !!vault.split, run: () => vault.closeSplit() });
     ctx.addCommand({
       id: "next",
       name: "Next tab",

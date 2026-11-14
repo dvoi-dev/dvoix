@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SaveStatus from "../../components/SaveStatus.svelte";
   import { editorStatus } from "../../editorStatus.svelte";
   import { fileTypeFor } from "../../filetypes";
   import { settings, type ViewMode } from "../../settings.svelte";
@@ -23,8 +24,9 @@
   }
 </script>
 
-{#if isMarkdown}
-  <div class="flex items-center gap-3">
+<div class="flex items-center gap-3">
+  <SaveStatus path={vault.openPath} />
+  {#if isMarkdown}
     {#if editorStatus.cursor && settings.app.viewMode !== "read"}
       <span class="tabular-nums">
         Ln {editorStatus.cursor.line}, Col {editorStatus.cursor.col}
@@ -38,5 +40,5 @@
     >
       {MODE_LABEL[settings.app.viewMode]}
     </button>
-  </div>
-{/if}
+  {/if}
+</div>

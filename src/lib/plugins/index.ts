@@ -9,5 +9,6 @@ for (const f of coreFeatures) plugins.addFeature(f);
 for (const p of corePlugins) plugins.add(p);
 
 export { plugins, hotkeyLabel } from "./manager.svelte";
+export type { Command } from "./manager.svelte";
 export { pluginStore } from "./store/store.svelte";
 export type * from "./types";

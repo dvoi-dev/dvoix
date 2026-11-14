@@ -4,7 +4,8 @@
 //   .dvoix/app.json                 editor settings
 //   .dvoix/appearance.json          theme, accent color, fonts and font sizes
 //   .dvoix/core-plugins.json        which core plugins are on ({ "tasks": true, ... })
-//   .dvoix/workspace.json           open tabs, side panel, expanded folders
+//   .dvoix/hotkeys.json             keyboard shortcut overrides per command
+//   .dvoix/workspace.json           open tabs, pins, split, side panel, expanded folders
 //   .dvoix/plugins/<id>/data.json   settings of one plugin
 //   .dvoix/plugins/<id>/manifest.json, main.js, styles.css   a plugin from the store
 //   .dvoix/store.json               store plugins: on/off, source, community switch

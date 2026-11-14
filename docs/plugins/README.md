@@ -78,7 +78,7 @@ Views are `mount(el, props)` functions: they draw into an empty element and opti
 | `addStatusBarItem({ id, mount, align, order })` | item in the bottom status bar (`align: "left" \| "right"`) |
 | `addOverlay({ id, mount })` | element on the top layer (dialogs) |
 | `registerView({ id, label, icon, mount })` | own view in a tab, open with `dvoix.openView(id)` |
-| `registerFileType({ id, label, extensions, icon, template, mount })` | new file type; `props` has `path`, `content`, `onchange(text)`, `onopen(path)`, `update(props)` is called when the file changes on disk |
+| `registerFileType({ id, label, extensions, icon, template, mount })` | new file type; `props` has `path`, `content`, `onchange(text)`, `onopen(path)`, `focused` (whether the pane is focused), `update(props)` is called when the content or pane focus changes |
 | `registerEditorExtension(ext)` | CodeMirror extension, built with `dvoix.lib.codemirror.state` / `.view` (same instance as the editor); `dvoix.lib.codemirror.merge` is `@codemirror/merge` for diff views |
 | `addSettingTab({ mount })` | own page in the settings |
 | `loadData(defaults)` / `saveData(data)` | settings in `.dvoix/plugins/<id>/data.json` |
