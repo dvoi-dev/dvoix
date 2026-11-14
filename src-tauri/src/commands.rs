@@ -232,7 +232,11 @@ pub fn restore_trash_entry(
     with_ws(&state, |ws| {
         let entry = ws
             .vault
-            .restore_from_trash(&name, target.as_deref(), rename_on_conflict.unwrap_or(false))
+            .restore_from_trash(
+                &name,
+                target.as_deref(),
+                rename_on_conflict.unwrap_or(false),
+            )
             .map_err(err)?;
         if entry.is_dir {
             let from = format!("{}/{}", dvoix_core::vault::TRASH_DIR, name);

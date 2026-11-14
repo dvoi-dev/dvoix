@@ -472,8 +472,8 @@ impl Vault {
     }
 
     fn write_trash_meta(&self, meta: &TrashMeta) -> Result<()> {
-        let json = serde_json::to_string_pretty(meta)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let json =
+            serde_json::to_string_pretty(meta).map_err(|e| std::io::Error::other(e.to_string()))?;
         self.write_config(TRASH_META_FILE, &(json + "\n"))
     }
 
@@ -938,8 +938,12 @@ mod tests {
 
         vault.write_config("snippets/Zebra.css", "body {}").unwrap();
         vault.write_config("snippets/alpha.CSS", "body {}").unwrap();
-        vault.write_config("snippets/readme.txt", "ignored").unwrap();
-        vault.write_config("snippets/sub/nested.css", "ignored").unwrap();
+        vault
+            .write_config("snippets/readme.txt", "ignored")
+            .unwrap();
+        vault
+            .write_config("snippets/sub/nested.css", "ignored")
+            .unwrap();
 
         assert_eq!(
             vault.list_snippets().unwrap(),
