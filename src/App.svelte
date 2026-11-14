@@ -9,12 +9,15 @@
   import Welcome from "./lib/components/Welcome.svelte";
   import WindowControls from "./lib/components/WindowControls.svelte";
   import SettingsDialog, { SETTINGS } from "./lib/components/settings/SettingsDialog.svelte";
+  import ToastContainer from "./lib/components/ToastContainer.svelte";
   import { flushConfig } from "./lib/config";
   import { plugins } from "./lib/plugins";
   import { settings } from "./lib/settings.svelte";
   import { ui } from "./lib/ui.svelte";
   import { vault } from "./lib/vault.svelte";
   import { appWindow, dragRegion } from "./lib/window.svelte";
+
+  const HEX_RE = /^#[0-9a-fA-F]{6}$/;
 
   let ready = $state(false);
 
@@ -38,6 +41,24 @@
     el.dataset.theme = a.theme;
     el.dataset.accent = a.accentColor;
     el.classList.toggle("dark", a.theme !== "light");
+    if (a.accentColor === "custom" && HEX_RE.test(a.customAccentColor)) {
+      const hex = a.customAccentColor;
+      if (a.theme === "light") {
+        root.setProperty("--color-violet-300", `color-mix(in srgb, ${hex} 70%, black)`);
+        root.setProperty("--color-violet-400", `color-mix(in srgb, ${hex} 84%, black)`);
+        root.setProperty("--color-violet-500", hex);
+        root.setProperty("--color-violet-600", `color-mix(in srgb, ${hex} 82%, black)`);
+        root.setProperty("--color-violet-700", `color-mix(in srgb, ${hex} 65%, black)`);
+      } else {
+        root.setProperty("--color-violet-300", `color-mix(in srgb, ${hex} 65%, white)`);
+        root.setProperty("--color-violet-400", `color-mix(in srgb, ${hex} 82%, white)`);
+        root.setProperty("--color-violet-500", hex);
+        root.setProperty("--color-violet-600", `color-mix(in srgb, ${hex} 85%, black)`);
+        root.setProperty("--color-violet-700", `color-mix(in srgb, ${hex} 68%, black)`);
+      }
+    } else {
+      for (const shade of [300, 400, 500, 600, 700]) root.removeProperty(`--color-violet-${shade}`);
+    }
     const appFont = a.interfaceFont === "system" ? "var(--font-system)" : a.interfaceFont === "mono" ? "var(--font-mono)" : "var(--font-sans)";
     const edFont = a.editorFont === "serif" ? "var(--font-serif)" : a.editorFont === "mono" ? "var(--font-mono)" : "var(--font-sans)";
     root.setProperty("--app-font-sans", appFont);
@@ -111,6 +132,7 @@
     {/if}
   </div>
   <ContextMenu />
+  <ToastContainer />
   {#each plugins.overlays as overlay (overlay.pluginId + overlay.id)}
     <overlay.component />
   {/each}

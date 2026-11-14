@@ -16,15 +16,19 @@ export interface AppSettings {
 export type ViewMode = "read" | "edit" | "source";
 
 export type ThemeId = "dark" | "midnight" | "slate" | "light";
-export type AccentColor = "violet" | "sky" | "emerald" | "rose" | "amber";
+export type AccentColor = "violet" | "sky" | "emerald" | "rose" | "amber" | "custom";
 export type EditorFont = "sans" | "serif" | "mono";
 export type InterfaceFont = "sans" | "system" | "mono";
 
 export interface AppearanceSettings {
   /** Color theme preset. */
   theme: ThemeId;
-  /** Accent highlight color preset. */
+  /** Accent highlight color preset or "custom". */
   accentColor: AccentColor;
+  /** Hex color (#rrggbb) used when `accentColor` is "custom". */
+  customAccentColor: string;
+  /** Enabled CSS snippet filenames in `.dvoix/snippets/`. */
+  cssSnippets: string[];
   /** Font family used in the editor and reading view. */
   editorFont: EditorFont;
   /** Font family used across the app interface. */
@@ -44,6 +48,8 @@ export const APP_DEFAULTS: AppSettings = {
 export const APPEARANCE_DEFAULTS: AppearanceSettings = {
   theme: "dark",
   accentColor: "violet",
+  customAccentColor: "#8b5cf6",
+  cssSnippets: [],
   editorFont: "sans",
   interfaceFont: "sans",
   fontSize: 15,

@@ -14,9 +14,11 @@ The files in the vault are the only source of truth. Users also edit them with o
 ```
 .dvoix/
   app.json                  editor settings
-  appearance.json           font sizes
+  appearance.json           theme, accent color, fonts, font sizes, CSS snippets
   core-plugins.json         which core plugins are on (core features are not listed)
   workspace.json            open tabs, active panel, width, expanded folders
+  trash.json                original paths and deletion times for items in .trash/
+  snippets/*.css            user CSS snippets
   plugins/<id>/data.json    settings of a plugin
   index.sqlite              search index, cache only
 ```

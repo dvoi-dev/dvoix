@@ -6,8 +6,8 @@
 //! window (on Windows it stays white until the work is done).
 
 use dvoix_core::{
-    GraphData, HiddenFilter, NoteSummary, RenderedNote, SearchHit, TaskItem, VaultEntry,
-    index::TagCount, markdown, tasks,
+    GraphData, HiddenFilter, NoteSummary, RenderedNote, SearchHit, TaskItem, TrashedEntry,
+    VaultEntry, index::TagCount, markdown, tasks,
 };
 use serde::Serialize;
 use tauri::{AppHandle, State};
@@ -209,11 +209,58 @@ pub fn rename_entry(state: State<AppState>, from: String, to: String) -> CmdResu
 }
 
 #[tauri::command(async)]
-pub fn trash_entry(state: State<AppState>, path: String) -> CmdResult<()> {
+pub fn trash_entry(state: State<AppState>, path: String) -> CmdResult<TrashedEntry> {
     with_ws(&state, |ws| {
-        ws.vault.trash(&path).map_err(err)?;
-        ws.index.lock().map_err(err)?.remove(&path).map_err(err)
+        let trashed = ws.vault.trash(&path).map_err(err)?;
+        ws.index.lock().map_err(err)?.remove(&path).map_err(err)?;
+        Ok(trashed)
     })
+}
+
+#[tauri::command(async)]
+pub fn list_trash(state: State<AppState>) -> CmdResult<Vec<TrashedEntry>> {
+    with_ws(&state, |ws| ws.vault.list_trash().map_err(err))
+}
+
+#[tauri::command(async)]
+pub fn restore_trash_entry(
+    state: State<AppState>,
+    name: String,
+    target: Option<String>,
+    rename_on_conflict: Option<bool>,
+) -> CmdResult<VaultEntry> {
+    with_ws(&state, |ws| {
+        let entry = ws
+            .vault
+            .restore_from_trash(&name, target.as_deref(), rename_on_conflict.unwrap_or(false))
+            .map_err(err)?;
+        if entry.is_dir {
+            let from = format!("{}/{}", dvoix_core::vault::TRASH_DIR, name);
+            ws.index
+                .lock()
+                .map_err(err)?
+                .move_folder(&ws.vault, &from, &entry.path)
+                .map_err(err)?;
+        } else {
+            reindex(ws, &entry.path)?;
+        }
+        Ok(entry)
+    })
+}
+
+#[tauri::command(async)]
+pub fn delete_trash_entry(state: State<AppState>, name: String) -> CmdResult<()> {
+    with_ws(&state, |ws| ws.vault.delete_trashed(&name).map_err(err))
+}
+
+#[tauri::command(async)]
+pub fn empty_trash(state: State<AppState>) -> CmdResult<()> {
+    with_ws(&state, |ws| ws.vault.empty_trash().map_err(err))
+}
+
+#[tauri::command(async)]
+pub fn list_snippets(state: State<AppState>) -> CmdResult<Vec<String>> {
+    with_ws(&state, |ws| ws.vault.list_snippets().map_err(err))
 }
 
 #[tauri::command(async)]
