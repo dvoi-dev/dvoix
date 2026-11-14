@@ -2,6 +2,7 @@
   // Quick switcher (Ctrl+O): fuzzy search over all files of the vault, like Obsidian's.
   import { FilePlus, Search } from "@lucide/svelte";
   import { fileTypeFor } from "../../filetypes";
+  import { focusTrap } from "../../focusTrap";
   import { fuzzyMatch, highlight } from "../../fuzzy";
   import { ui } from "../../ui.svelte";
   import { vault } from "../../vault.svelte";
@@ -60,10 +61,6 @@
     el?.scrollIntoView({ block: "nearest" });
   });
 
-  function focus(el: HTMLInputElement) {
-    requestAnimationFrame(() => el.focus());
-  }
-
   function close() {
     if (ui.modal === "quick-switcher") ui.modal = null;
     query = "";
@@ -95,26 +92,34 @@
   <div
     class="fixed top-[12vh] left-1/2 z-50 flex max-h-[70vh] w-[min(640px,92vw)] -translate-x-1/2 flex-col overflow-hidden rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl"
     role="dialog"
+    aria-modal="true"
     aria-label="Quick switcher"
+    use:focusTrap
   >
     <div class="flex items-center gap-2.5 border-b border-zinc-800 px-4">
       <Search size={16} class="shrink-0 text-zinc-500" />
       <input
         class="w-full bg-transparent py-3 text-[15px] text-zinc-100 outline-none placeholder:text-zinc-500"
         placeholder="Find a file …"
-        use:focus
+        role="combobox"
+        aria-expanded="true"
+        aria-controls="quick-switcher-list"
+        aria-autocomplete="list"
+        aria-activedescendant={count ? `quick-switcher-option-${selected}` : undefined}
         bind:value={query}
         onkeydown={keydown}
         onblur={close}
       />
     </div>
-    <div class="min-h-0 flex-1 overflow-y-auto p-1.5" bind:this={list} role="listbox">
+    <div id="quick-switcher-list" class="min-h-0 flex-1 overflow-y-auto p-1.5" bind:this={list} role="listbox" aria-label="Files">
       {#each items as item, i (item.path)}
         <button
           class="flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left transition-colors {i === selected ? 'bg-zinc-800' : ''}"
           data-index={i}
+          id="quick-switcher-option-{i}"
           role="option"
           aria-selected={i === selected}
+          tabindex="-1"
           onmousedown={(e) => e.preventDefault()}
           onmousemove={() => (selected = i)}
           onclick={(e) => choose(i, e.ctrlKey || e.metaKey)}
@@ -142,8 +147,10 @@
         <button
           class="flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm text-zinc-300 transition-colors {selected === items.length ? 'bg-zinc-800' : ''}"
           data-index={items.length}
+          id="quick-switcher-option-{items.length}"
           role="option"
           aria-selected={selected === items.length}
+          tabindex="-1"
           onmousedown={(e) => e.preventDefault()}
           onmousemove={() => (selected = items.length)}
           onclick={(e) => choose(items.length, e.ctrlKey || e.metaKey)}

@@ -24,6 +24,11 @@ ureq = "3.5"
 [dev-dependencies]
 tempfile = "3"
 
+# Updates and the restart after installing one only exist on the desktop.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-process = "2"
+tauri-plugin-updater = "2"
+
 # Settings of the Linux webview that Tauri doesn't expose (smooth scrolling).
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = "2.0.2"

@@ -2,6 +2,7 @@
   import { ChevronRight } from "@lucide/svelte";
   import Self from "./TreeItem.svelte";
   import { FOLDER_PAGE, visibleChildren, type TreeNode } from "./tree";
+  import { treeFocus } from "./treeFocus.svelte";
   import { contextMenu } from "../../components/contextMenuState.svelte";
   import { DRAG_TYPE, entryMenu } from "./fileMenu";
   import { vault } from "../../vault.svelte";
@@ -22,9 +23,13 @@
   const hidden = $derived(entry.path.split("/").some((part) => part.startsWith(".")));
   /** Folder a drop on this row moves into. */
   const dropFolder = $derived(entry.isDir ? entry.path : entry.path.split("/").slice(0, -1).join("/"));
+  const groupId = $derived(`tree-group-${encodeURIComponent(entry.path)}`);
 
   let draft = $state("");
   let dropTarget = $state(false);
+  let rowEl: HTMLDivElement | undefined = $state();
+  /** Roving tabindex: only the row the keyboard is on (or the first one) is a tab stop. */
+  const tabbable = $derived((treeFocus.path ?? treeFocus.first) === entry.path);
   /** How many children of this folder are drawn; big folders grow in steps. */
   let limit = $state(FOLDER_PAGE);
   const shown = $derived(visibleChildren(node.children, limit));
@@ -39,7 +44,13 @@
     if (index >= limit) limit = Math.ceil((index + 1) / FOLDER_PAGE) * FOLDER_PAGE;
   });
 
+  // An explicit focus request (arrow keys, click) focuses this row's element.
+  $effect(() => {
+    if (treeFocus.request > 0 && treeFocus.path === entry.path && !renaming) rowEl?.focus();
+  });
+
   function click(e: MouseEvent) {
+    treeFocus.focus(entry.path);
     if (entry.isDir) ui.toggleFolder(entry.path);
     else void vault.openFile(entry.path, { newTab: e.ctrlKey || e.metaKey });
   }
@@ -54,8 +65,12 @@
 
   async function finishRename() {
     if (ui.renaming !== entry.path) return;
+    const name = draft.trim();
     ui.renaming = null;
-    await vault.rename(entry.path, draft);
+    if (!name) return;
+    const parent = entry.path.includes("/") ? entry.path.slice(0, entry.path.lastIndexOf("/") + 1) : "";
+    await vault.rename(entry.path, name);
+    treeFocus.focus(`${parent}${name}`);
   }
 
   function dragOver(e: DragEvent) {
@@ -76,14 +91,20 @@
 </script>
 
 <div
-  class="group flex h-7 items-center gap-1 rounded-md pr-2 text-[13px] transition-colors {active
+  bind:this={rowEl}
+  class="group flex h-7 items-center gap-1 rounded-md pr-2 text-[13px] transition-colors outline-none focus-visible:ring-1 focus-visible:ring-violet-500 focus-visible:ring-inset {active
     ? 'bg-zinc-800 text-zinc-50'
     : 'text-zinc-300 hover:bg-zinc-800/60'} {dropTarget && entry.isDir ? 'ring-1 ring-violet-500 ring-inset' : ''}"
   style:padding-left="{0.5 + depth * 1}rem"
   role="treeitem"
   aria-selected={active}
   aria-expanded={entry.isDir ? expanded : undefined}
-  tabindex="-1"
+  aria-owns={entry.isDir && expanded ? groupId : undefined}
+  aria-level={depth + 1}
+  tabindex={tabbable ? 0 : -1}
+  data-tree-path={entry.path}
+  data-tree-dir={entry.isDir ? "true" : "false"}
+  data-tree-depth={depth}
   draggable={!renaming}
   ondragstart={(e) => {
     e.dataTransfer?.setData(DRAG_TYPE, entry.path);
@@ -112,7 +133,7 @@
       }}
     />
   {:else}
-    <button class="flex h-full min-w-0 flex-1 items-center gap-2 text-left" onclick={click} onauxclick={(e) => {
+    <button tabindex="-1" class="flex h-full min-w-0 flex-1 items-center gap-2 text-left" onclick={click} onauxclick={(e) => {
       if (e.button === 1 && !entry.isDir) void vault.openFile(entry.path, { newTab: true });
     }}>
       <span class="truncate" class:font-medium={entry.isDir} class:opacity-60={hidden}>{label}</span>
@@ -124,7 +145,7 @@
 </div>
 
 {#if entry.isDir && expanded}
-  <div class="relative">
+  <div class="relative" id={groupId} role="group">
     <!-- indent guide like in Obsidian -->
     <div class="absolute top-0 bottom-0 w-px bg-zinc-800" style:left="{0.5 + depth * 1 + 0.5}rem"></div>
     {#each shown as child (child.entry.path)}

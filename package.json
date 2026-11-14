@@ -1,7 +1,7 @@
 {
   "name": "dvoix",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT OR Apache-2.0",
   "type": "module",
   "scripts": {
@@ -12,6 +12,10 @@
     "preview": "vite preview",
     "precheck": "node scripts/check-deps.mjs",
     "check": "svelte-check --tsconfig ./tsconfig.json",
+    "pretest": "node scripts/check-deps.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "bump": "node scripts/bump-version.mjs",
     "tauri": "tauri",
     "bench:editor": "node scripts/bench-editor.mjs",
     "bench:panels": "node scripts/bench-panels.mjs"
@@ -30,6 +34,8 @@
     "@lucide/svelte": "^1.70.0",
     "@tauri-apps/api": "^2.12.4",
     "@tauri-apps/plugin-dialog": "^2.8.4",
+    "@tauri-apps/plugin-process": "^2.4.0",
+    "@tauri-apps/plugin-updater": "^2.14.1",
     "codemirror": "^6.0.2",
     "force-graph": "^1.52.0"
   },
@@ -38,11 +44,13 @@
     "@tailwindcss/vite": "^4.3.5",
     "@tauri-apps/cli": "^2.12.4",
     "@tsconfig/svelte": "^5.0.8",
+    "happy-dom": "^21.0.4",
     "svelte": "^5.57.3",
     "svelte-check": "^4.7.8",
     "tailwindcss": "^4.3.5",
     "typescript": "~6.0.3",
-    "vite": "^8.3.6"
+    "vite": "^8.3.6",
+    "vitest": "^5.1.0"
   },
   "engines": {
     "node": ">=26"

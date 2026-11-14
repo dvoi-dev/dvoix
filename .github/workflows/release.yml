@@ -1,0 +1,123 @@
+name: Release
+
+# Builds signed bundles for Windows, macOS and Linux and uploads them to a
+# GitHub release together with `latest.json`, the feed the in-app updater
+# reads. Trigger: push a tag like v0.2.0 (see scripts/bump-version.mjs).
+# The release is a draft until a maintainer publishes it; only published
+# releases are served to the updater.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    uses: ./.github/workflows/ci.yml
+
+  draft:
+    needs: check
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.draft.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: The tag must match the app version
+        shell: bash
+        run: |
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match the app version v$version. Run 'npm run bump ${GITHUB_REF_NAME#v}' first." >&2
+            exit 1
+          fi
+
+      - name: Create or reuse the release
+        id: draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          release_ids="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate \
+            --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | .id")"
+          release_id="${release_ids%%$'\n'*}"
+          if [ -z "$release_id" ]; then
+            release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$GITHUB_REF_NAME" \
+              -f name="dvoix v$version" \
+              -f body="Download the bundle for your system below. Once this release is published, installed apps update themselves from it." \
+              -F draft=true \
+              -F prerelease=false \
+              --jq .id)"
+          fi
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: draft
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The older LTS keeps the Linux bundles runnable on older
+          # distributions (glibc); the other runners use the latest image.
+          - platform: ubuntu-22.04
+            args: ""
+          - platform: macos-latest
+            args: "--target universal-apple-darwin"
+          - platform: windows-latest
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Tauri system dependencies (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev libxdo-dev libssl-dev
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+
+      # Toolchain comes from rust-toolchain.toml (latest stable).
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Require the updater signing key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::Set the TAURI_SIGNING_PRIVATE_KEY repository secret to the contents of ~/.tauri/dvoix-updater.key." >&2
+            exit 1
+          fi
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the update bundles; the app verifies them with the public
+          # key in src-tauri/tauri.conf.json. Required, updates must be signed.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Optional: signs and notarizes the macOS bundle. Without these the
+          # app is ad-hoc signed and Gatekeeper asks once on first open.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          releaseId: ${{ needs.draft.outputs.release_id }}
+          releaseBody: "Download the bundle for your system below. Once this release is published, installed apps update themselves from it."
+          args: ${{ matrix.args }}
+          updaterJsonPreferNsis: true
+          retryAttempts: 3

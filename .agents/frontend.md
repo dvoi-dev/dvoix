@@ -18,13 +18,14 @@
 - Select lists use `src/lib/components/Select.svelte`, never a native `<select>`. Its open list is painted by the system; under Linux (WebKitGTK) it stays white despite CSS and `"theme": "Dark"`.
 - Icons from `@lucide/svelte`. Styling with Tailwind and the CSS variables from `src/app.css`, so light and dark stay consistent.
 - UI texts in English, short and without jargon. Label keyboard shortcuts with Ctrl/Cmd.
-- The keyboard must work: dialogs close with Esc, lists can be used with the arrow keys and Enter.
+- The keyboard must work: dialogs close with Esc and keep the focus inside (`src/lib/focusTrap.ts`), lists can be used with the arrow keys and Enter, the file tree uses a roving tabindex, and `prefers-reduced-motion` disables animations.
 
 ## Checks
 
 ```sh
 npm run check   # must pass without errors and without new warnings
 npm run build
+npm run test    # Vitest; DOM tests use happy-dom
 ```
 
 `npm run dev`, `npm run check` and `npm run build` first check with `scripts/check-deps.mjs` whether all dependencies from `package.json` are installed. If a package is missing, the message says so with a hint to `npm install`, instead of "Failed to resolve import …" from Vite.

@@ -6,8 +6,9 @@
 <script lang="ts">
   // Settings (Ctrl+,): editor, appearance, keyboard shortcuts, core plugins on/off,
   // the plugin store, and one page per core feature or plugin that has settings. Everything is saved in `<vault>/.dvoix/`.
-  import { Check, FilePenLine, Keyboard, Palette, Puzzle, RotateCcw, Store, X } from "@lucide/svelte";
+  import { Check, FilePenLine, Info, Keyboard, Palette, Puzzle, RotateCcw, Store, X } from "@lucide/svelte";
   import Select from "../Select.svelte";
+  import { focusTrap } from "../../focusTrap";
   import Setting from "./Setting.svelte";
   import StorePage from "./StorePage.svelte";
   import Toggle from "./Toggle.svelte";
@@ -22,6 +23,7 @@
     type ViewMode,
   } from "../../settings.svelte";
   import { ui } from "../../ui.svelte";
+  import { updater } from "../../updater.svelte";
   import { vault } from "../../vault.svelte";
 
   const THEMES: { id: ThemeId; label: string; bg: string; panel: string; text: string }[] = [
@@ -110,6 +112,7 @@
     role="dialog"
     aria-modal="true"
     aria-label="Settings"
+    use:focusTrap
   >
     <nav class="w-54 shrink-0 overflow-y-auto border-r border-zinc-800 bg-zinc-950/60 p-2">
       <div class="px-2.5 pt-2 pb-1 text-[11px] font-medium tracking-wide text-zinc-500 uppercase">Options</div>
@@ -124,6 +127,10 @@
       <button class={navBtn(page === "shortcuts")} onclick={() => (page = "shortcuts")}>
         <Keyboard size={14} strokeWidth={1.75} class={page === "shortcuts" ? "text-violet-400" : "text-zinc-500"} />
         <span class="truncate">Keyboard shortcuts</span>
+      </button>
+      <button class={navBtn(page === "about")} onclick={() => (page = "about")}>
+        <Info size={14} strokeWidth={1.75} class={page === "about" ? "text-violet-400" : "text-zinc-500"} />
+        <span class="truncate">About</span>
       </button>
       {#each featurePages as p (p.id)}
         <button class={navBtn(page === p.id)} onclick={() => (page = p.id)}>
@@ -158,11 +165,13 @@
               ? "Appearance"
               : page === "shortcuts"
                 ? "Keyboard shortcuts"
-                : page === "plugins"
-                  ? "Core plugins"
-                  : page === "store"
-                    ? "Plugin store"
-                    : (allPages.find((p) => p.id === page)?.label ?? "")}
+                : page === "about"
+                  ? "About"
+                  : page === "plugins"
+                    ? "Core plugins"
+                    : page === "store"
+                      ? "Plugin store"
+                      : (allPages.find((p) => p.id === page)?.label ?? "")}
         </h2>
         <button class="rounded-md p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200" aria-label="Close" onclick={close}>
           <X size={16} />
@@ -336,6 +345,43 @@
               </div>
             {/each}
           {/each}
+        {:else if page === "about"}
+          <Setting name="Version" description="The running version of dvoix.">
+            <span class="text-sm text-zinc-300 tabular-nums">{updater.appVersion || "dev"}</span>
+          </Setting>
+          <Setting
+            name="Updates"
+            description="Checks the GitHub releases for a new version. Updates are signed, download in the background and install on restart."
+          >
+            {#if updater.status === "available"}
+              <button
+                class="rounded-md bg-violet-500 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-violet-600"
+                onclick={() => void updater.install()}
+              >
+                Install {updater.version} & restart
+              </button>
+            {:else if updater.status === "downloading"}
+              <span class="text-xs text-zinc-400 tabular-nums">Downloading … {Math.round(updater.progress * 100)}%</span>
+            {:else}
+              <button
+                class="rounded-md bg-zinc-800 px-2.5 py-1 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-700 disabled:opacity-50"
+                disabled={updater.status === "checking"}
+                onclick={() => void updater.check()}
+              >
+                {updater.status === "checking" ? "Checking …" : "Check for updates"}
+              </button>
+            {/if}
+          </Setting>
+          {#if updater.status === "up-to-date"}
+            <p class="py-2 text-xs text-zinc-500">dvoix is up to date.</p>
+          {:else if updater.status === "error"}
+            <p class="py-2 text-xs text-red-400">{updater.error}</p>
+          {:else if updater.status === "available" && updater.notes}
+            <div class="py-3">
+              <div class="text-sm text-zinc-100">Release notes</div>
+              <pre class="mt-1 max-h-48 overflow-y-auto rounded-md bg-zinc-950/60 p-2 text-xs whitespace-pre-wrap text-zinc-400">{updater.notes}</pre>
+            </div>
+          {/if}
         {:else if page === "plugins"}
           <p class="py-3 text-xs leading-relaxed text-zinc-400">
             Optional functions that come with dvoix. Turned-off plugins disappear from the sidebar, menus and keyboard
