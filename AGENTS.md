@@ -69,6 +69,7 @@ crates/dvoix-core/src/   logic without UI: vault.rs, markdown.rs, tasks.rs, stor
 src-tauri/src/           Tauri shell: lib.rs (setup, handler list), commands.rs (all commands), http.rs (downloads for the store), settings.rs
 src/lib/api.ts           typed wrappers for every Rust command
 src/lib/config.ts        read/write JSON in <vault>/.dvoix/ (deferred, batched)
+src/lib/events.ts        app events for plugins (ctx.on): active file, save, create, rename, delete
 src/lib/*.svelte.ts      app state (vault, ui, settings, window) with runes
 src/lib/filetypes/       file type registry, Markdown editor, fallback view
 src/lib/features/        one folder per core feature (always on), list in features/index.ts

@@ -3,6 +3,7 @@
 // the app to render. Core features are always loaded; plugins can be turned off.
 import type { Extension } from "@codemirror/state";
 import { readJsonRaw, readJson, writeJson } from "../config";
+import { appEvents } from "../events";
 import { registerFileType } from "../filetypes";
 import { vault } from "../vault.svelte";
 import type {
@@ -365,6 +366,7 @@ class PluginManager {
       },
       addExplorerEntries: (source) =>
         addTo(() => this.explorerEntryList, (v) => (this.explorerEntryList = v), { ...source, pluginId }, (s) => s.id),
+      on: (event, handler) => track(appEvents.on(event, handler)),
       register: (fn) => void track(fn),
       loadData: (defaults) => readJson(dataFile, defaults),
       saveData: (data) => writeJson(dataFile, data),

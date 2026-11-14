@@ -63,6 +63,7 @@ src-tauri/              Tauri app: holds the open vault, connects watcher, index
 src/                    Svelte frontend
   lib/api.ts            typed calls to the Rust commands
   lib/vault.svelte.ts   app state: open vault, open file, saving
+  lib/events.ts         app events plugins listen to (active file, save, create, rename, delete)
   lib/config.ts         read and write JSON files in <vault>/.dvoix/
   lib/settings.svelte.ts  editor and appearance settings
   lib/ui.svelte.ts      workspace: active panel, width, expanded folders, open tabs
@@ -113,6 +114,7 @@ Every function hooks into the app through a small API, the same for core feature
 | `ctx.registerView(...)` | own view that runs like a file in a tab (graph); open with `vault.openViewTab(id)` |
 | `ctx.addSettingTab(...)` | own page in the settings |
 | `ctx.loadData()` / `ctx.saveData()` | own data in `.dvoix/plugins/<id>/data.json` |
+| `ctx.on(event, handler)` | app events (`src/lib/events.ts`): `active-file-change`, `file-save` (the editor saved), `file-create`, `file-rename`, `file-delete` (made in dvoix); changes from outside come through the file watcher |
 
 ### Hidden files
 

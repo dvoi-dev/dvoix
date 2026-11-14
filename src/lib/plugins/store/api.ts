@@ -14,7 +14,8 @@ import * as cmView from "@codemirror/view";
 import * as cmMerge from "@codemirror/merge";
 import type { Extension } from "@codemirror/state";
 import { api, type PluginPermission, type StoreManifest, type VaultEntry } from "../../api";
-import { vault } from "../../vault.svelte";
+import { appEvents, type AppEvents } from "../../events";
+import { vault, type VaultChangeKind } from "../../vault.svelte";
 import type { CommandSpec, Dispose, PluginContext } from "../types";
 import { iconComponent, mountComponent } from "./component";
 
@@ -88,15 +89,26 @@ export interface DvoixPluginApi {
     /**
      * Needs `vault:read`. Calls `fn` with the vault-relative paths of every
      * batch of changes on disk (the app's own saves, sync tools, git, other
-     * editors). Returns the unsubscribe; it also ends with the plugin.
+     * editors), and as second argument what happened to each path. Returns
+     * the unsubscribe; it also ends with the plugin.
      */
-    onChange(fn: (paths: string[]) => void): Dispose;
+    onChange(fn: (paths: string[], changes: VaultChangeKind[]) => void): Dispose;
+    /** Needs `vault:read`. The editor saved the open file. */
+    onSave(fn: (path: string) => void): Dispose;
+    /** Needs `vault:read`. dvoix created a file or folder (explorer, link, pasted image, a plugin). */
+    onCreate(fn: (e: AppEvents["file-create"]) => void): Dispose;
+    /** Needs `vault:read`. dvoix renamed or moved a file or folder. */
+    onRename(fn: (e: AppEvents["file-rename"]) => void): Dispose;
+    /** Needs `vault:read`. dvoix moved a file or folder to the trash. */
+    onDelete(fn: (e: AppEvents["file-delete"]) => void): Dispose;
   };
   /** Needs `process`. Runs a program in the vault folder, see `ProcessSpec`. */
   process: { spawn(spec: ProcessSpec): ProcessHandle };
   workspace: {
     /** Vault-relative path of the file in the active tab, null for views and empty tabs. */
     activeFile(): string | null;
+    /** Calls `fn` with the new `activeFile()` whenever it changes. */
+    onActiveFileChange(fn: (path: string | null) => void): Dispose;
   };
   openView(id: string): Promise<void>;
   /** The app's own CodeMirror (incl. `@codemirror/merge` for diffs), so extensions fit the editor. */
@@ -174,7 +186,11 @@ export function createApi(ctx: PluginContext, manifest: StoreManifest): DvoixPlu
       write: async (path, content) => {
         need("vault:write");
         const exists = vault.entries.some((e) => e.path === path && !e.isDir);
-        await (exists ? api.writeFile(path, content) : api.createFile(path, content));
+        if (exists) await api.writeFile(path, content);
+        else {
+          const entry = await api.createFile(path, content);
+          appEvents.emit("file-create", { path: entry.path, isDir: false });
+        }
       },
       openFile: (path) => vault.openFile(path),
       onChange: (fn) => {
@@ -182,6 +198,22 @@ export function createApi(ctx: PluginContext, manifest: StoreManifest): DvoixPlu
         const off = vault.onChanges(fn);
         ctx.register(off);
         return off;
+      },
+      onSave: (fn) => {
+        need("vault:read");
+        return ctx.on("file-save", (e) => fn(e.path));
+      },
+      onCreate: (fn) => {
+        need("vault:read");
+        return ctx.on("file-create", fn);
+      },
+      onRename: (fn) => {
+        need("vault:read");
+        return ctx.on("file-rename", fn);
+      },
+      onDelete: (fn) => {
+        need("vault:read");
+        return ctx.on("file-delete", fn);
       },
     },
     process: {
@@ -223,6 +255,16 @@ export function createApi(ctx: PluginContext, manifest: StoreManifest): DvoixPlu
     },
     workspace: {
       activeFile: () => vault.activeTab?.path ?? null,
+      onActiveFileChange: (fn) => {
+        // Switching between two views is a change for the app, not for
+        // `activeFile()`, which is null for both.
+        let last = vault.activeTab?.path ?? null;
+        return ctx.on("active-file-change", ({ path }) => {
+          if (path === last) return;
+          last = path;
+          fn(path);
+        });
+      },
     },
     openView: (id) => vault.openViewTab(own(id)),
     lib: { codemirror: { state: cmState, view: cmView, merge: cmMerge } },

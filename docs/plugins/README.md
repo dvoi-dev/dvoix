@@ -83,9 +83,12 @@ Views are `mount(el, props)` functions: they draw into an empty element and opti
 | `addSettingTab({ mount })` | own page in the settings |
 | `loadData(defaults)` / `saveData(data)` | settings in `.dvoix/plugins/<id>/data.json` |
 | `vault.list()`, `vault.read(path)`, `vault.write(path, text)`, `vault.openFile(path)` | files, paths relative to the vault |
-| `vault.onChange(fn)` | needs `vault:read`; `fn(paths)` gets the vault-relative paths of every batch of changes on disk (own saves, sync, git, other editors); returns the unsubscribe |
+| `vault.onChange(fn)` | needs `vault:read`; `fn(paths, changes)` gets the vault-relative paths of every batch of changes on disk (own saves, sync, git, other editors) and, as `changes`, `{ path, kind }` with `kind` `"created"`, `"modified"` or `"removed"`; returns the unsubscribe |
+| `vault.onSave(fn)` | needs `vault:read`; `fn(path)` after the editor wrote the open file (shortly after typing stops, or before switching away). Writes of plugins (`vault.write`) do not count |
+| `vault.onCreate(fn)`, `vault.onRename(fn)`, `vault.onDelete(fn)` | need `vault:read`; `fn({ path, isDir })`, `fn({ from, to, isDir })`, `fn({ path, isDir })` when dvoix itself created, renamed/moved or trashed a file or folder (file explorer, links, pasted images, `vault.write` of a plugin). Changes from outside dvoix only arrive through `vault.onChange` |
 | `register(fn)` | `fn` runs when the plugin is switched off |
 | `workspace.activeFile()` | vault-relative path of the file in the active tab, `null` for views and empty tabs |
+| `workspace.onActiveFileChange(fn)` | `fn(path)` whenever `activeFile()` changes; also once right after the vault opened |
 | `process.spawn({ command, args, stdin, env, onStdout, onStderr, onExit })` | needs `process`; see below |
 
 ### Running programs (`process`)
@@ -103,6 +106,8 @@ proc.kill();
 ```
 
 The program always runs in the vault folder, with the rights of the user, so it can reach more than the vault. If it can't be started (e.g. not installed), the reason arrives on `onStderr` and `onExit(null)` follows. Running programs are killed when the plugin is switched off and when the vault is closed. On Windows no console window opens. Prefer stdin over arguments for free text: `cmd.exe` changes quotes and newlines in the arguments of `.cmd` files.
+
+All `on…` calls return the unsubscribe; whatever is still subscribed ends with the plugin anyway.
 
 The app runs with a Content Security Policy: no `eval`/`new Function`, no scripts from the network, no frames or workers, and `fetch` only reaches the app's own backend. Bundle everything into `main.js`. Images may come from `https:`.
 
