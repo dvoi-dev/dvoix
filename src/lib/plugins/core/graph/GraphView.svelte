@@ -613,7 +613,7 @@
   });
 
   $effect(() => {
-    void [appSettings.appearance.theme, appSettings.appearance.accentColor];
+    void [appSettings.appearance.theme, appSettings.appearance.accentColor, appSettings.appearance.customAccentColor];
     const id = requestAnimationFrame(() => {
       alphaColors.clear();
       labelWidths.clear();

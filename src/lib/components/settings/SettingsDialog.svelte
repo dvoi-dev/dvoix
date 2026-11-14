@@ -6,8 +6,9 @@
 <script lang="ts">
   // Settings (Ctrl+,): editor, appearance, keyboard shortcuts, core plugins on/off,
   // the plugin store, and one page per core feature or plugin that has settings. Everything is saved in `<vault>/.dvoix/`.
-  import { Check, FilePenLine, Keyboard, Palette, Puzzle, RotateCcw, Store, X } from "@lucide/svelte";
+  import { Check, FilePenLine, Keyboard, Palette, Pipette, Puzzle, RotateCcw, Store, X } from "@lucide/svelte";
   import Select from "../Select.svelte";
+  import CssSnippetsSection from "./CssSnippetsSection.svelte";
   import Setting from "./Setting.svelte";
   import StorePage from "./StorePage.svelte";
   import Toggle from "./Toggle.svelte";
@@ -89,6 +90,14 @@
     const n = Number(raw);
     if (!Number.isFinite(n)) return;
     settings.appearance[key] = Math.min(28, Math.max(10, Math.round(n)));
+    settings.saveAppearance();
+  }
+
+  function setCustomAccent(raw: string) {
+    const trimmed = raw.trim();
+    if (!/^#[0-9a-fA-F]{6}$/.test(trimmed)) return;
+    settings.appearance.customAccentColor = trimmed.toLowerCase();
+    settings.appearance.accentColor = "custom";
     settings.saveAppearance();
   }
 
@@ -240,6 +249,36 @@
                   {/if}
                 </button>
               {/each}
+              <label
+                class="relative flex h-6 w-6 cursor-pointer items-center justify-center rounded-full border transition-transform hover:scale-110 {settings.appearance.accentColor === 'custom'
+                  ? 'border-zinc-100 ring-2 ring-zinc-500/40'
+                  : 'border-zinc-600'}"
+                style:background-color={settings.appearance.customAccentColor}
+                title="Custom accent color"
+                aria-label="Custom accent color"
+              >
+                <input
+                  type="color"
+                  class="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                  value={settings.appearance.customAccentColor}
+                  oninput={(e) => setCustomAccent(e.currentTarget.value)}
+                  onclick={() => {
+                    if (settings.appearance.accentColor !== "custom") setAppearance("accentColor", "custom");
+                  }}
+                />
+                <Pipette size={11} class="pointer-events-none text-white drop-shadow" />
+              </label>
+              {#if settings.appearance.accentColor === "custom"}
+                <input
+                  type="text"
+                  maxlength={7}
+                  spellcheck="false"
+                  aria-label="Custom accent hex color"
+                  class="w-20 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 font-mono text-xs text-zinc-200 outline-none focus:border-violet-500"
+                  value={settings.appearance.customAccentColor}
+                  oninput={(e) => setCustomAccent(e.currentTarget.value)}
+                />
+              {/if}
             </div>
           </Setting>
 
@@ -322,6 +361,7 @@
               {/if}
             </div>
           </Setting>
+          <CssSnippetsSection />
         {:else if page === "shortcuts"}
           {#each shortcutGroups as g (g.id)}
             <div class="pt-4 pb-1 text-[11px] font-medium tracking-wide text-zinc-500 uppercase">{g.name}</div>

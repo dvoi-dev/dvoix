@@ -16,6 +16,15 @@ export interface VaultEntry {
   modified: number;
 }
 
+export interface TrashedEntry {
+  name: string;
+  trashPath: string;
+  originalPath: string | null;
+  isDir: boolean;
+  size: number;
+  deletedAt: number;
+}
+
 export interface SearchHit {
   path: string;
   title: string;
@@ -151,7 +160,13 @@ export const api = {
     invoke<VaultEntry>("create_binary", bytes, { headers: { path: encodeURIComponent(path) } }),
   createFolder: (path: string) => invoke<VaultEntry>("create_folder", { path }),
   renameEntry: (from: string, to: string) => invoke<VaultEntry>("rename_entry", { from, to }),
-  trashEntry: (path: string) => invoke<void>("trash_entry", { path }),
+  trashEntry: (path: string) => invoke<TrashedEntry>("trash_entry", { path }),
+  listTrash: () => invoke<TrashedEntry[]>("list_trash"),
+  restoreTrashEntry: (name: string, target: string | null = null, renameOnConflict = false) =>
+    invoke<VaultEntry>("restore_trash_entry", { name, target, renameOnConflict }),
+  deleteTrashEntry: (name: string) => invoke<void>("delete_trash_entry", { name }),
+  emptyTrash: () => invoke<void>("empty_trash"),
+  listSnippets: () => invoke<string[]>("list_snippets"),
   search: (query: string) => invoke<SearchHit[]>("search", { query }),
   tags: () => invoke<TagCount[]>("tags"),
   notesWithTag: (tag: string) => invoke<NoteSummary[]>("notes_with_tag", { tag }),
