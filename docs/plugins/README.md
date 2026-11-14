@@ -104,6 +104,8 @@ proc.kill();
 
 The program always runs in the vault folder, with the rights of the user, so it can reach more than the vault. If it can't be started (e.g. not installed), the reason arrives on `onStderr` and `onExit(null)` follows. Running programs are killed when the plugin is switched off and when the vault is closed. On Windows no console window opens. Prefer stdin over arguments for free text: `cmd.exe` changes quotes and newlines in the arguments of `.cmd` files.
 
+The app runs with a Content Security Policy: no `eval`/`new Function`, no scripts from the network, no frames or workers, and `fetch` only reaches the app's own backend. Bundle everything into `main.js`. Images may come from `https:`.
+
 Colors: the CSS variables of Tailwind (e.g. `var(--color-zinc-300)`, `var(--color-violet-500)`) match the rest of the app. Give classes in `styles.css` their own prefix; the file applies to the whole app.
 
 ## Testing locally

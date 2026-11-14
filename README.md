@@ -141,6 +141,8 @@ The plugin list is a `registry.json` in the repository [`dvoi-dev/dvoix-plugins`
 
 Each plugin states in its manifest what it needs (`vault:read`, `vault:write`, `editor`, `process` for starting programs in the vault folder, e.g. AI agent tools). This is shown in the store before installing, and the API refuses anything that is not declared. It is not a sandbox: like in Obsidian, plugins run inside the app and could bypass the API. That is why official and community plugins are kept apart.
 
+The app window runs with a strict Content Security Policy (`app.security.csp` in `src-tauri/tauri.conf.json`): scripts only from the app itself and from the `blob:` URLs store plugins are loaded from, no `eval`, no frames, objects or workers, and network requests from the page only to the app's own backend. Images may still come from `https:`, so remote images in notes keep working. This limits what a broken or hostile script (e.g. from a note) can load or send, but it is defense in depth, not a sandbox: a plugin still runs with the rights of the app and can start programs with `process`.
+
 How to write a plugin for the store is described in [`docs/plugins/README.md`](docs/plugins/README.md), with an example plugin in `docs/plugins/hello/`.
 
 ## Adding a new feature
