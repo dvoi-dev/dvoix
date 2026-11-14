@@ -8,12 +8,13 @@
   import FilePane from "./lib/components/FilePane.svelte";
   import Welcome from "./lib/components/Welcome.svelte";
   import WindowControls from "./lib/components/WindowControls.svelte";
-  import SettingsDialog, { SETTINGS } from "./lib/components/settings/SettingsDialog.svelte";
+  import SettingsDialog from "./lib/components/settings/SettingsDialog.svelte";
   import ToastContainer from "./lib/components/ToastContainer.svelte";
   import { flushConfig } from "./lib/config";
   import { plugins } from "./lib/plugins";
   import { settings } from "./lib/settings.svelte";
   import { ui } from "./lib/ui.svelte";
+  import { hotkeys } from "./lib/hotkeys.svelte";
   import { vault } from "./lib/vault.svelte";
   import { appWindow, dragRegion } from "./lib/window.svelte";
 
@@ -68,17 +69,12 @@
     root.setProperty("--editor-max-width", settings.app.readableLineLength ? "48rem" : "none");
   });
 
-  /** App-wide shortcuts: plugin commands plus Ctrl+, for the settings. Captured before the editor sees them. */
+  /** App-wide shortcuts are captured before the editor sees them. */
   function shortcuts(e: KeyboardEvent) {
-    if (!vault.info) return;
-    const mod = e.ctrlKey || e.metaKey;
-    if (mod && !e.shiftKey && !e.altKey && e.key === ",") {
-      ui.toggleModal(SETTINGS);
-    } else {
-      const cmd = plugins.commandFor(e, ui.modal !== null);
-      if (!cmd) return;
-      void cmd.run();
-    }
+    if (!vault.info || hotkeys.capturing) return;
+    const cmd = plugins.commandFor(e, ui.modal !== null);
+    if (!cmd) return;
+    plugins.run(cmd.fullId);
     e.preventDefault();
     e.stopPropagation();
   }
@@ -111,7 +107,13 @@
           </div>
         </div>
         <div class="flex min-h-0 flex-1">
-          <FilePane />
+          {#if vault.split}
+            <FilePane />
+            <div class="w-px shrink-0 bg-zinc-800" role="separator" aria-orientation="vertical"></div>
+            <FilePane pane="right" />
+          {:else}
+            <FilePane />
+          {/if}
           <RightSidebar />
         </div>
       </div>

@@ -5,10 +5,9 @@
   // settings button says that store plugins have updates.
   import { ArrowLeftRight, Settings } from "@lucide/svelte";
   import { plugins, pluginStore } from "../plugins";
-  import { ui } from "../ui.svelte";
+  import { ui, SETTINGS } from "../ui.svelte";
   import { vault } from "../vault.svelte";
   import { dragRegion } from "../window.svelte";
-  import { SETTINGS } from "./settings/SettingsDialog.svelte";
 
   const items = $derived(
     [
@@ -45,7 +44,12 @@
 
   <div class="my-1 h-px w-5 bg-zinc-800/80"></div>
 
-  <button class="{btn} {idle}" title="Open another vault" aria-label="Open another vault" onclick={() => vault.close()}>
+  <button
+    class="{btn} {idle}"
+    title="Open another vault"
+    aria-label="Open another vault"
+    onclick={() => void vault.close().catch(() => undefined)}
+  >
     <ArrowLeftRight size={18} strokeWidth={1.75} />
   </button>
   <button

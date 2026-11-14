@@ -4,21 +4,36 @@
   // bar) and window buttons sit in the title row above (see `App.svelte`).
   import { ArrowLeft, ArrowRight, FileText, Search } from "@lucide/svelte";
   import { fileTypeFor } from "../filetypes";
-  import { plugins } from "../plugins";
+  import { hotkeyLabel, plugins } from "../plugins";
   import { ui } from "../ui.svelte";
-  import { vault } from "../vault.svelte";
+  import { vault, type PaneSide } from "../vault.svelte";
+  import SaveStatus from "./SaveStatus.svelte";
 
-  const path = $derived(vault.openPath);
+  let { pane = "left" }: { pane?: PaneSide } = $props();
+
+  const tab = $derived(vault.paneTab(pane));
+  const path = $derived(tab?.path ?? null);
+  const content = $derived(vault.contentFor(path));
+  const focused = $derived(vault.focusedPane === pane);
   const segments = $derived(path ? path.split("/") : []);
   const type = $derived(path ? fileTypeFor(path) : undefined);
   /** A plugin view (e.g. the graph) shown in the active tab instead of a file. */
-  const view = $derived(vault.openView ? plugins.view(vault.openView) : undefined);
+  const view = $derived(tab?.view ? plugins.view(tab.view) : undefined);
   const SWITCHER = "quick-switcher:open";
+  const switcherKeys = $derived.by(() => {
+    const command = plugins.commands.find((candidate) => candidate.fullId === SWITCHER);
+    return command ? plugins.hotkeysFor(command).map(hotkeyLabel).join(" / ") : "";
+  });
   const navBtn =
     "flex h-6 w-6 items-center justify-center rounded text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200 disabled:pointer-events-none disabled:opacity-30";
 </script>
 
-<main class="flex min-w-0 flex-1 flex-col">
+<main
+  class="flex min-w-0 flex-1 flex-col"
+  data-pane={pane}
+  onfocusin={() => vault.focusPane(pane)}
+  onmousedowncapture={() => vault.focusPane(pane)}
+>
   {#if view}
     <div class="min-h-0 flex-1">
       {#key view.id}
@@ -31,7 +46,7 @@
         <div class="mr-0.5 flex shrink-0 items-center gap-0.5">
           <button
             class={navBtn}
-            title="Navigate back (Alt+Left)"
+            title="Navigate back"
             aria-label="Navigate back"
             disabled={!vault.canGoBack}
             onclick={() => vault.goBack()}
@@ -40,7 +55,7 @@
           </button>
           <button
             class={navBtn}
-            title="Navigate forward (Alt+Right)"
+            title="Navigate forward"
             aria-label="Navigate forward"
             disabled={!vault.canGoForward}
             onclick={() => vault.goForward()}
@@ -70,10 +85,7 @@
         </nav>
       </div>
       <div class="flex shrink-0 items-center gap-3">
-        <span class="inline-flex items-center gap-1.5 text-[11px] {vault.dirty ? 'text-amber-300/90' : 'text-zinc-500'}">
-          <span class="h-1.5 w-1.5 rounded-full {vault.dirty ? 'bg-amber-400' : 'bg-zinc-600'}"></span>
-          {vault.dirty ? "Saving …" : "Saved"}
-        </span>
+        <SaveStatus {path} announce={false} />
         {#if type.headerActions}
           <type.headerActions {path} />
         {/if}
@@ -83,8 +95,9 @@
       {#key path}
         <type.view
           {path}
-          content={vault.content}
-          onchange={(c) => vault.update(c)}
+          {content}
+          {focused}
+          onchange={(c) => vault.update(c, path)}
           onopen={(target) => vault.openLink(target)}
         />
       {/key}
@@ -108,15 +121,15 @@
         >
           <Search size={13} class="text-violet-400" />
           Find a file
-          <kbd>Ctrl+O</kbd>
+          {#if switcherKeys}<kbd>{switcherKeys}</kbd>{/if}
         </button>
       {/if}
     </div>
   {/if}
-  {#if vault.error}
-    <div class="flex items-center justify-between border-t border-red-900 bg-red-950/50 px-4 py-2 text-xs text-red-300">
+  {#if focused && vault.error}
+    <div class="flex items-center justify-between border-t border-danger/40 bg-danger/10 px-4 py-2 text-xs text-danger">
       <span>{vault.error}</span>
-      <button class="ml-3 rounded px-1.5 py-0.5 text-red-200 hover:bg-red-900/50" onclick={() => (vault.error = null)}>Dismiss</button>
+      <button class="ml-3 rounded px-1.5 py-0.5 text-danger hover:bg-danger/15" onclick={() => (vault.error = null)}>Dismiss</button>
     </div>
   {/if}
 </main>

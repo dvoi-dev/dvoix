@@ -29,6 +29,7 @@ export interface FileViewProps {
   content: string;
   onchange: (content: string) => void;
   onopen: (path: string) => void;
+  focused?: boolean;
 }
 
 export interface ProcessSpec {

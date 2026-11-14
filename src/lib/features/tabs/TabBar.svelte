@@ -1,7 +1,7 @@
 <script lang="ts">
   // Editor tabs above the open file: click to switch, middle click or × to close,
-  // drag to reorder, "+" (Ctrl+T) for an empty tab.
-  import { File, Plus, X } from "@lucide/svelte";
+  // drag to reorder, pin, split right, "+" for an empty tab.
+  import { Columns2, File, Pin, PinOff, Plus, X } from "@lucide/svelte";
   import { fileTypeFor } from "../../filetypes";
   import { contextMenu } from "../../components/contextMenuState.svelte";
   import { TAB_DRAG } from "../../drag";
@@ -28,6 +28,10 @@
 
   function menu(e: MouseEvent, tab: Tab) {
     contextMenu.show(e, [
+      { label: tab.pinned ? "Unpin tab" : "Pin tab", icon: tab.pinned ? PinOff : Pin, action: () => vault.togglePin(tab.id) },
+      { label: "Split right", icon: Columns2, action: () => void vault.splitRight(tab.id) },
+      ...(vault.split ? [{ label: "Close split", icon: Columns2, action: () => void vault.closeSplit() }] : []),
+      "separator",
       { label: "Close", icon: X, action: () => void vault.closeTab(tab.id) },
       { label: "Close other tabs", action: () => void vault.closeOtherTabs(tab.id) },
     ]);
@@ -47,6 +51,9 @@
     vault.moveTab(dragId, dropAt > from ? dropAt - 1 : dropAt);
     dragId = dropAt = null;
   }
+
+  const tabButton =
+    "flex h-5 w-5 shrink-0 items-center justify-center rounded text-zinc-500 transition-colors hover:bg-zinc-700 hover:text-zinc-100";
 </script>
 
 <!-- Scrolls sideways without a visible scrollbar; the mouse wheel scrolls it horizontally. -->
@@ -63,17 +70,20 @@
 >
   {#each vault.tabs as tab, i (tab.id)}
     {@const active = tab.id === vault.activeTabId}
+    {@const splitVisible = !!vault.split && (tab.id === vault.split.left || tab.id === vault.split.right)}
     {@const nextActive = vault.tabs[i + 1]?.id === vault.activeTabId}
     {@const type = tab.view ? plugins.view(tab.view) : tab.path ? fileTypeFor(tab.path) : undefined}
     <div
-      class="group relative -mb-px flex h-[calc(100%+1px)] max-w-52 min-w-24 shrink items-center gap-1.5 rounded-t-md border border-b-0 pr-1 pl-2.5 text-[13px] transition-colors {active
+      class="group relative -mb-px flex h-[calc(100%+1px)] max-w-52 min-w-28 shrink items-center gap-1.5 rounded-t-md border border-b-0 pr-1 pl-2.5 text-[13px] transition-colors {active
         ? 'border-zinc-800 bg-zinc-950 text-zinc-100'
-        : 'border-transparent text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'}"
+        : splitVisible
+          ? 'border-zinc-800/70 bg-zinc-950/60 text-zinc-300'
+          : 'border-transparent text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'}"
       data-tab-id={tab.id}
       role="tab"
       tabindex="0"
       aria-selected={active}
-      title={tab.path ?? title(tab)}
+      title="{tab.path ?? title(tab)}{tab.pinned ? ' (pinned)' : ''}"
       draggable="true"
       ondragstart={(e) => {
         dragId = tab.id;
@@ -88,11 +98,18 @@
       }}
       onauxclick={(e) => e.button === 1 && vault.closeTab(tab.id)}
       onclick={() => vault.activateTab(tab.id)}
-      onkeydown={(e) => (e.key === "Enter" || e.key === " ") && vault.activateTab(tab.id)}
+      onkeydown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          void vault.activateTab(tab.id);
+        }
+      }}
       oncontextmenu={(e) => menu(e, tab)}
     >
       {#if active}
         <span class="absolute top-0 right-2 left-2 h-0.5 rounded-b bg-violet-500"></span>
+      {:else if splitVisible}
+        <span class="absolute top-0 right-2 left-2 h-0.5 rounded-b bg-zinc-600"></span>
       {/if}
       {#if !active && !nextActive && i < vault.tabs.length - 1}
         <span class="pointer-events-none absolute top-2 right-[-2px] bottom-2 w-px bg-zinc-800/80 group-hover:opacity-0"></span>
@@ -104,12 +121,35 @@
       {:else}
         <File size={14} strokeWidth={1.75} class="shrink-0 text-zinc-500" />
       {/if}
+      {#if tab.pinned}
+        <Pin size={11} strokeWidth={1.75} class="shrink-0 text-violet-400" aria-label="Pinned" />
+      {/if}
       <span class="min-w-0 flex-1 truncate">{title(tab)}</span>
       <button
-        class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-zinc-500 transition-colors hover:bg-zinc-700 hover:text-zinc-100 {active
-          ? ''
-          : 'opacity-0 group-hover:opacity-100'}"
-        title="Close (Ctrl+W)"
+        class="{tabButton} {tab.pinned || active ? '' : 'opacity-0 group-hover:opacity-100'}"
+        title={tab.pinned ? "Unpin tab" : "Pin tab"}
+        aria-label={tab.pinned ? "Unpin tab" : "Pin tab"}
+        onclick={(e) => {
+          e.stopPropagation();
+          vault.togglePin(tab.id);
+        }}
+      >
+        {#if tab.pinned}<PinOff size={12} />{:else}<Pin size={12} />{/if}
+      </button>
+      <button
+        class="{tabButton} {active ? '' : 'opacity-0 group-hover:opacity-100'}"
+        title="Split right"
+        aria-label="Split right"
+        onclick={(e) => {
+          e.stopPropagation();
+          void vault.splitRight(tab.id);
+        }}
+      >
+        <Columns2 size={12} />
+      </button>
+      <button
+        class="{tabButton} {active ? '' : 'opacity-0 group-hover:opacity-100'}"
+        title="Close tab"
         aria-label="Close tab"
         onclick={(e) => {
           e.stopPropagation();
@@ -122,7 +162,7 @@
   {/each}
   <button
     class="mb-0.5 ml-1 flex h-6 w-6 shrink-0 items-center justify-center self-center rounded-md text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
-    title="New tab (Ctrl+T)"
+    title="New tab"
     aria-label="New tab"
     onclick={() => vault.newTab()}
   >

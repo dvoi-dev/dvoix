@@ -1,8 +1,3 @@
-<script module lang="ts">
-  /** Modal id of the settings dialog (`ui.modal`). */
-  export const SETTINGS = "settings";
-</script>
-
 <script lang="ts">
   // Settings (Ctrl+,): editor, appearance, keyboard shortcuts, core plugins on/off,
   // the plugin store, and one page per core feature or plugin that has settings. Everything is saved in `<vault>/.dvoix/`.
@@ -10,6 +5,7 @@
   import Select from "../Select.svelte";
   import CssSnippetsSection from "./CssSnippetsSection.svelte";
   import Setting from "./Setting.svelte";
+  import HotkeySettings from "./HotkeySettings.svelte";
   import StorePage from "./StorePage.svelte";
   import Toggle from "./Toggle.svelte";
   import { hotkeyLabel, plugins, pluginStore, type Plugin } from "../../plugins";
@@ -22,7 +18,8 @@
     type ThemeId,
     type ViewMode,
   } from "../../settings.svelte";
-  import { ui } from "../../ui.svelte";
+  import { ui, SETTINGS } from "../../ui.svelte";
+  import { hotkeys } from "../../hotkeys.svelte";
   import { vault } from "../../vault.svelte";
 
   const THEMES: { id: ThemeId; label: string; bg: string; panel: string; text: string }[] = [
@@ -50,12 +47,6 @@
   const featurePages = $derived(pagesOf(plugins.features));
   const pluginPages = $derived(pagesOf([...plugins.all, ...plugins.extra]));
   const allPages = $derived([...featurePages, ...pluginPages]);
-  /** Everything that registered commands with shortcuts, core features first. */
-  const shortcutGroups = $derived(
-    [...plugins.features, ...plugins.all, ...plugins.extra]
-      .map((p) => ({ id: p.manifest.id, name: p.manifest.name, commands: commandsOf(p.manifest.id) }))
-      .filter((g) => g.commands.length),
-  );
   const activeTab = $derived(
     page.startsWith("plugin:") ? plugins.settingTabs.find((t) => `plugin:${t.pluginId}` === page) : undefined,
   );
@@ -70,6 +61,7 @@
   }
 
   function keydown(e: KeyboardEvent) {
+    if (hotkeys.capturing) return;
     if (e.key === "Escape") {
       e.preventDefault();
       close();
@@ -86,6 +78,10 @@
     settings.saveAppearance();
   }
 
+  function commandsOf(pluginId: string) {
+    return plugins.commands.filter((command) => command.pluginId === pluginId && plugins.hotkeysFor(command).length);
+  }
+
   function setSize(key: "fontSize" | "interfaceFontSize", raw: string) {
     const n = Number(raw);
     if (!Number.isFinite(n)) return;
@@ -99,10 +95,6 @@
     settings.appearance.customAccentColor = trimmed.toLowerCase();
     settings.appearance.accentColor = "custom";
     settings.saveAppearance();
-  }
-
-  function commandsOf(pluginId: string) {
-    return plugins.commands.filter((c) => c.pluginId === pluginId && c.hotkeys?.length);
   }
 
   const navBtn = (active: boolean) =>
@@ -368,19 +360,7 @@
           </Setting>
           <CssSnippetsSection />
         {:else if page === "shortcuts"}
-          {#each shortcutGroups as g (g.id)}
-            <div class="pt-4 pb-1 text-[11px] font-medium tracking-wide text-zinc-500 uppercase">{g.name}</div>
-            {#each g.commands as c (c.fullId)}
-              <div class="flex items-center justify-between gap-4 border-b border-zinc-800/40 py-1.5 text-sm text-zinc-300 last:border-b-0">
-                <span class="truncate">{c.name}</span>
-                <span class="flex shrink-0 gap-1">
-                  {#each c.hotkeys! as h, i (i)}
-                    <kbd>{hotkeyLabel(h)}</kbd>
-                  {/each}
-                </span>
-              </div>
-            {/each}
-          {/each}
+          <HotkeySettings />
         {:else if page === "plugins"}
           <p class="py-3 text-xs leading-relaxed text-zinc-400">
             Optional functions that come with dvoix. Turned-off plugins disappear from the sidebar, menus and keyboard
@@ -404,7 +384,7 @@
             {#if on && commandsOf(id).length}
               <div class="-mt-2 flex flex-wrap gap-x-4 gap-y-1 pb-3 text-[11px] text-zinc-500">
                 {#each commandsOf(id) as c (c.fullId)}
-                  <span class="inline-flex items-center gap-1">{c.name}: <kbd>{hotkeyLabel(c.hotkeys![0])}</kbd></span>
+                  <span class="inline-flex items-center gap-1">{c.name}: <kbd>{hotkeyLabel(plugins.hotkeysFor(c)[0])}</kbd></span>
                 {/each}
               </div>
             {/if}
