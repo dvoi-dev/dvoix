@@ -72,6 +72,67 @@ export function neighborhood(model: GraphModel, rootId: string, depth: number): 
 }
 
 /**
+ * The data of the whole vault with the notes of `paths` replaced by `part`,
+ * the answer of `api.graphNotes(paths)`: their old entries and outgoing links
+ * go, what the index has for them now comes in. A path missing from `part`
+ * was removed or is no longer a note. Links of other notes are untouched,
+ * because a link belongs to the note it is written in.
+ *
+ * Everything keeps its place: a changed note stays where it was, its links
+ * take the place of its old ones, only new ones go to the end. The model built
+ * from the result then has its nodes and lines in the same order as before,
+ * so `sameShape` can compare them place by place.
+ */
+export function patchGraphData(data: GraphData, paths: string[], part: GraphData): GraphData {
+  const changed = new Set(paths);
+  const fresh = new Map(part.notes.map((note) => [note.path, note]));
+  const notes: GraphData["notes"] = [];
+  for (const note of data.notes) {
+    if (!changed.has(note.path)) notes.push(note);
+    else if (fresh.has(note.path)) {
+      notes.push(fresh.get(note.path)!);
+      fresh.delete(note.path);
+    }
+  }
+  for (const note of fresh.values()) notes.push(note);
+
+  const linksOf = new Map<string, GraphData["links"]>();
+  for (const link of part.links) {
+    const list = linksOf.get(link.source);
+    if (list) list.push(link);
+    else linksOf.set(link.source, [link]);
+  }
+  const links: GraphData["links"] = [];
+  for (const link of data.links) {
+    if (!changed.has(link.source)) links.push(link);
+    else {
+      const list = linksOf.get(link.source);
+      if (list) links.push(...list);
+      linksOf.delete(link.source);
+    }
+  }
+  for (const list of linksOf.values()) links.push(...list);
+  return { notes, links };
+}
+
+/**
+ * True when two models have the same nodes and lines in the same order. Two
+ * models built from the same data, or from data patched by `patchGraphData`
+ * without a new or lost link, line up place by place, so this needs no keys.
+ * A different order only costs one unneeded update of the view.
+ */
+export function sameShape(left: GraphModel, right: GraphModel): boolean {
+  if (left.nodes.length !== right.nodes.length || left.edges.length !== right.edges.length) return false;
+  for (let i = 0; i < left.nodes.length; i++) if (left.nodes[i].id !== right.nodes[i].id) return false;
+  for (let i = 0; i < left.edges.length; i++) {
+    const a = left.edges[i];
+    const b = right.edges[i];
+    if (a.source !== b.source || a.target !== b.target || a.kind !== b.kind) return false;
+  }
+  return true;
+}
+
+/**
  * Above this many notes a tag is drawn as a node even in "shared" mode:
  * lines between every pair would be n² lines and only make a hairball.
  */

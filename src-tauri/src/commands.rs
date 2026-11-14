@@ -274,6 +274,15 @@ pub fn graph(state: State<AppState>) -> CmdResult<GraphData> {
     })
 }
 
+/// The graph data of only these notes, so the graph view can patch its copy
+/// after a change instead of reading the whole vault (see `Index::graph_notes`).
+#[tauri::command(async)]
+pub fn graph_notes(state: State<AppState>, paths: Vec<String>) -> CmdResult<GraphData> {
+    with_ws(&state, |ws| {
+        ws.index.lock().map_err(err)?.graph_notes(&paths).map_err(err)
+    })
+}
+
 #[tauri::command(async)]
 pub fn tasks(state: State<AppState>) -> CmdResult<Vec<TaskItem>> {
     with_ws(&state, |ws| {

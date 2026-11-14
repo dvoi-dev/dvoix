@@ -150,6 +150,7 @@ pub fn run() {
             commands::notes_where,
             commands::backlinks,
             commands::graph,
+            commands::graph_notes,
             commands::tasks,
             commands::set_task_done,
             commands::read_config,
