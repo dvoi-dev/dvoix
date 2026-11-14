@@ -279,7 +279,11 @@ pub fn graph(state: State<AppState>) -> CmdResult<GraphData> {
 #[tauri::command(async)]
 pub fn graph_notes(state: State<AppState>, paths: Vec<String>) -> CmdResult<GraphData> {
     with_ws(&state, |ws| {
-        ws.index.lock().map_err(err)?.graph_notes(&paths).map_err(err)
+        ws.index
+            .lock()
+            .map_err(err)?
+            .graph_notes(&paths)
+            .map_err(err)
     })
 }
 

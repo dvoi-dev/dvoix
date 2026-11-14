@@ -1317,7 +1317,10 @@ mod tests {
     fn graph_notes_matches_the_whole_graph() {
         let (_dir, vault) = sample_vault();
         vault
-            .write("beta.md", "# Beta\nA #project, see [[Alpha]] and [[Gamma]].")
+            .write(
+                "beta.md",
+                "# Beta\nA #project, see [[Alpha]] and [[Gamma]].",
+            )
             .unwrap();
         let mut index = Index::for_vault(&vault).unwrap();
         index.rebuild(&vault).unwrap();
