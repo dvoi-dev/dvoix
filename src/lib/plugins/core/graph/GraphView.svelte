@@ -2,8 +2,8 @@
   // The graph view in a tab: notes as nodes, drawn on a canvas by force-graph
   // (d3-force layout), so a few thousand nodes stay smooth.
   import type ForceGraph from "force-graph";
-  import { onMount } from "svelte";
-  import { Crosshair, ExternalLink, Maximize, Pause, Play, RotateCcw, X, ZoomIn, ZoomOut } from "@lucide/svelte";
+  import { onMount, untrack } from "svelte";
+  import { Crosshair, ExternalLink, Maximize, Pause, Play, RotateCcw, SlidersHorizontal, X, ZoomIn, ZoomOut } from "@lucide/svelte";
   import { api, type GraphData } from "../../../api";
   import { vault } from "../../../vault.svelte";
   import GraphOptions from "./GraphOptions.svelte";
@@ -48,8 +48,9 @@
   let loaded = $state(false);
   let paused = $state(false);
   let zoomLevel = $state(1);
-  let hovered = $state<SimNode | null>(null);
-  let inspected = $state<SimNode | null>(null);
+  let hovered = $state.raw<SimNode | null>(null);
+  let preview = $state.raw<SimNode | null>(null);
+  let inspected = $state.raw<SimNode | null>(null);
   let focusId = $state<string | null>(null);
   let fitted = false;
   let disposed = false;
@@ -57,9 +58,15 @@
   let reloadTimer: ReturnType<typeof setTimeout> | undefined;
   let defaultAlphaMin = DEFAULT_ALPHA_MIN;
   let neighbours = new Set<string>();
+  let activeId: string | null = null;
   let adjacency = new Map<string, Set<string>>();
   let simNodes = new Map<string, SimNode>();
+  let labelOrder: SimNode[] = [];
   let positionCache = new Map<string, SimNode>();
+  let engineRunning = false;
+  let hoverFlushFrame: number | undefined;
+  const labelWidths = new Map<string, number>();
+  const alphaColors = new Map<string, string>();
 
   const settings = $derived(graphSettings.value);
   const ready = $derived(version > 0);
@@ -88,6 +95,7 @@
   const model = $derived(buildGraph(data, vault.entries, modelSettings ?? wanted, vault.info?.name ?? "Vault"));
   const displayModel = $derived(focusId ? neighborhood(model, focusId, settings.focusDepth) : model);
   const focusNode = $derived(focusId ? (model.nodes.find((node) => node.id === focusId) ?? null) : null);
+  const cardNode = $derived(preview ?? inspected);
   const error = $derived(importError ?? loadError);
   const noteCount = $derived(displayModel.nodes.filter((node) => node.kind === "note").length);
   const connectionCount = $derived(displayModel.edges.length);
@@ -131,8 +139,14 @@
   let groupIndex = new Map<string, number>();
 
   function withAlpha(color: string, alpha: number): string {
-    if (color.startsWith("rgba(")) return color.replace(/,\s*[\d.]+\)$/, `, ${alpha})`);
-    return color.replace("rgb(", "rgba(").replace(")", `, ${alpha})`);
+    const key = `${color}|${alpha}`;
+    const cached = alphaColors.get(key);
+    if (cached) return cached;
+    const result = color.startsWith("rgba(")
+      ? color.replace(/,\s*[\d.]+\)$/, `, ${alpha})`)
+      : color.replace("rgb(", "rgba(").replace(")", `, ${alpha})`);
+    alphaColors.set(key, result);
+    return result;
   }
 
   function nodeColor(node: SimNode): string {
@@ -142,18 +156,14 @@
     return colors.kinds[node.kind] ?? colors.node;
   }
 
-  function activeNode(): SimNode | null {
-    return hovered ?? inspected;
-  }
-
   function refreshNeighbours() {
-    const active = activeNode();
+    const active = hovered ?? inspected;
+    activeId = active?.id ?? null;
     neighbours = active ? (adjacency.get(active.id) ?? new Set()) : new Set();
   }
 
   function isLit(node: SimNode): boolean {
-    const active = activeNode();
-    return !active || node.id === active.id || neighbours.has(node.id);
+    return !activeId || node.id === activeId || neighbours.has(node.id);
   }
 
   function endId(end: string | SimNode): string {
@@ -161,8 +171,7 @@
   }
 
   function linkLit(link: SimLink): boolean {
-    const active = activeNode();
-    return !!active && (endId(link.source) === active.id || endId(link.target) === active.id);
+    return !!activeId && (endId(link.source) === activeId || endId(link.target) === activeId);
   }
 
   function radius(node: SimNode): number {
@@ -209,8 +218,7 @@
 
   function drawNode(node: SimNode, ctx: CanvasRenderingContext2D, scale: number) {
     const nodeRadius = radius(node);
-    const active = activeNode();
-    const isActive = active?.id === node.id;
+    const isActive = activeId === node.id;
     const isFocus = focusId === node.id;
     ctx.save();
     ctx.globalAlpha = isLit(node) ? 1 : 0.18;
@@ -246,32 +254,17 @@
     ctx.fill();
   }
 
-  function linkBaseColor(link: SimLink): string {
-    if (link.kind === "folder") return withAlpha(colors.kinds.folder ?? colors.structure, 0.45);
-    if (link.kind === "tag") return withAlpha(colors.kinds.tag ?? colors.structure, 0.45);
-    return colors.link;
-  }
-
   function linkColor(link: SimLink): string {
     if (linkLit(link)) return colors.highlight;
-    const base = linkBaseColor(link);
-    return activeNode() ? withAlpha(base, 0.12) : base;
+    return activeId ? withAlpha(colors.link, 0.25) : colors.link;
   }
 
   function linkWidth(link: SimLink): number {
-    const kind = link.kind === "link" ? 1 : 0.8;
-    return settings.linkWidth * kind * (linkLit(link) ? 1.8 : 1);
+    return settings.linkWidth * (linkLit(link) ? 1.8 : 1);
   }
 
-  function linkDash(link: SimLink): number[] | null {
-    if (linkLit(link)) return null;
-    if (link.kind === "folder") return [6, 4];
-    if (link.kind === "tag") return [2, 3];
-    return null;
-  }
-
-  function arrowLength(link: SimLink): number {
-    return settings.arrows && link.kind === "link" ? 3.5 : 0;
+  function arrowLength(): number {
+    return settings.arrows ? 3.5 : 0;
   }
 
   function viewportBounds(scale: number) {
@@ -287,19 +280,15 @@
     };
   }
 
-  function labelPriority(node: SimNode, active: SimNode | null): number {
-    if (active?.id === node.id) return 3;
-    if (focusId === node.id) return 2;
-    if (neighbours.has(node.id)) return 1;
-    return 0;
-  }
-
   function drawLabels(ctx: CanvasRenderingContext2D, scale: number) {
     const bounds = viewportBounds(scale);
     if (!bounds) return;
-    const active = activeNode();
-    const candidates: SimNode[] = [];
-    for (const node of simNodes.values()) {
+    const active = activeId;
+    const primary: SimNode[] = [];
+    const focused: SimNode[] = [];
+    const adjacent: SimNode[] = [];
+    const automatic: SimNode[] = [];
+    for (const node of labelOrder) {
       if (node.x === undefined || node.y === undefined) continue;
       if (
         node.x < bounds.left - bounds.margin ||
@@ -309,28 +298,28 @@
       ) {
         continue;
       }
-      const forced = node.id === active?.id || node.id === focusId || neighbours.has(node.id);
-      const automatic = settings.labels && scale >= settings.labelZoom && (!active || isLit(node));
-      if (forced || automatic) candidates.push(node);
+      if (node.id === active) primary.push(node);
+      else if (node.id === focusId) focused.push(node);
+      else if (neighbours.has(node.id)) adjacent.push(node);
+      else if (!active && settings.labels && scale >= settings.labelZoom) automatic.push(node);
     }
-    candidates.sort(
-      (left, right) =>
-        labelPriority(right, active) - labelPriority(left, active) ||
-        right.degree - left.degree ||
-        left.label.localeCompare(right.label),
-    );
+    const candidates = primary.concat(focused, adjacent, automatic);
 
     const boxes: LabelBox[] = [];
     const fontSize = 12 / scale;
     const padding = 4 / scale;
     let drawn = 0;
     ctx.save();
+    ctx.font = "500 12px Inter, ui-sans-serif, system-ui, sans-serif";
+    for (const node of candidates) {
+      if (!labelWidths.has(node.label)) labelWidths.set(node.label, ctx.measureText(node.label).width);
+    }
     ctx.font = `500 ${fontSize}px Inter, ui-sans-serif, system-ui, sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     for (const node of candidates) {
       if (drawn >= LABEL_LIMIT) break;
-      const width = ctx.measureText(node.label).width;
+      const width = (labelWidths.get(node.label) ?? 0) / scale;
       const left = node.x! - width / 2 - padding;
       const top = node.y! + radius(node) + 4 / scale;
       const right = left + width + padding * 2;
@@ -341,7 +330,7 @@
       roundedRectPath(ctx, left, top, right - left, bottom - top, 3 / scale);
       ctx.fillStyle = colors.labelBg;
       ctx.fill();
-      ctx.fillStyle = node.id === active?.id ? colors.highlight : colors.label;
+      ctx.fillStyle = node.id === active ? colors.highlight : colors.label;
       ctx.fillText(node.label, node.x!, top + padding);
       drawn++;
     }
@@ -350,6 +339,26 @@
 
   function redraw() {
     graph?.nodeCanvasObject(drawNode);
+  }
+
+  function cancelHoverFlush() {
+    if (hoverFlushFrame === undefined) return;
+    cancelAnimationFrame(hoverFlushFrame);
+    hoverFlushFrame = undefined;
+  }
+
+  function flushHoverBitmap() {
+    cancelHoverFlush();
+    graph?.nodePointerAreaPaint(paintArea);
+  }
+
+  function queueHoverFlush() {
+    if (hoverFlushFrame !== undefined) return;
+    hoverFlushFrame = requestAnimationFrame(flushHoverBitmap);
+  }
+
+  function handlePointerMove() {
+    if (engineRunning) queueHoverFlush();
   }
 
   function gravity() {
@@ -391,6 +400,11 @@
     const zoom = Math.min(MAX_FIT_ZOOM, Math.max(MIN_ZOOM, Math.min(availableWidth / width, availableHeight / height)));
     graph.centerAt((bounds.x[0] + bounds.x[1]) / 2, (bounds.y[0] + bounds.y[1]) / 2, 400);
     graph.zoom(zoom, 400);
+  }
+
+  function toggleControls() {
+    graphSettings.value.controlsOpen = !graphSettings.value.controlsOpen;
+    graphSettings.save();
   }
 
   function zoomBy(factor: number) {
@@ -437,11 +451,25 @@
   }
 
   function hoverNode(node: SimNode | null) {
+    if ((hovered?.id ?? null) === (node?.id ?? null)) return;
     hovered = node;
-    if (node) inspected = node;
+    if (node) preview = node;
     refreshNeighbours();
-    container.style.cursor = node && openable(node) ? "pointer" : "";
     redraw();
+  }
+
+  function enterCanvas() {
+    graph?.enablePointerInteraction(true);
+    flushHoverBitmap();
+  }
+
+  function leaveGraph() {
+    cancelHoverFlush();
+    hovered = null;
+    preview = null;
+    refreshNeighbours();
+    redraw();
+    graph?.enablePointerInteraction(false);
   }
 
   function clickNode(node: SimNode) {
@@ -459,6 +487,7 @@
 
   function backgroundClick() {
     hovered = null;
+    preview = null;
     inspected = null;
     refreshNeighbours();
     redraw();
@@ -469,7 +498,7 @@
     if (event.key === "Escape") {
       setFocus(null);
       inspected = null;
-      hovered = null;
+      preview = null;
       refreshNeighbours();
       redraw();
     } else if (event.key === "+" || event.key === "=") {
@@ -484,6 +513,9 @@
     } else if (event.key === " ") {
       event.preventDefault();
       paused = !paused;
+    } else if (event.key === "c") {
+      event.preventDefault();
+      toggleControls();
     }
   }
 
@@ -515,9 +547,10 @@
       .nodeLabel(() => "")
       .nodeCanvasObject(drawNode)
       .nodePointerAreaPaint(paintArea)
+      .linkPointerAreaPaint(() => {})
+      .showPointerCursor((obj) => !!obj && openable(obj as SimNode))
       .linkColor(linkColor)
       .linkWidth(linkWidth)
-      .linkLineDash(linkDash)
       .linkDirectionalArrowLength(arrowLength)
       .linkDirectionalArrowRelPos(1)
       .minZoom(MIN_ZOOM)
@@ -525,10 +558,18 @@
       .cooldownTime(8000)
       .d3Force("center", null)
       .d3Force("gravity", gravity())
+      .onEngineTick(() => {
+        engineRunning = true;
+      })
+      .onEngineStop(() => {
+        engineRunning = false;
+        flushHoverBitmap();
+      })
       .onRenderFramePost(drawLabels)
       .onZoom((transform) => {
         zoomLevel = transform.k;
       })
+      .onZoomEnd(() => flushHoverBitmap())
       .onNodeHover(hoverNode)
       .onNodeClick(clickNode)
       .onNodeRightClick(rightClickNode)
@@ -548,13 +589,21 @@
     const scheme = matchMedia("(prefers-color-scheme: dark)");
     const recolor = () => {
       colors = readColors();
+      alphaColors.clear();
+      labelWidths.clear();
       redraw();
     };
     scheme.addEventListener("change", recolor);
+    void document.fonts?.ready.then(() => {
+      if (disposed) return;
+      labelWidths.clear();
+      redraw();
+    });
     return () => {
       disposed = true;
       clearTimeout(fitTimer);
       clearTimeout(reloadTimer);
+      cancelHoverFlush();
       resize.disconnect();
       scheme.removeEventListener("change", recolor);
       graph?._destructor();
@@ -615,15 +664,20 @@
       positionCache.set(node.id, sim);
     }
     simNodes = next;
+    labelOrder = [...next.values()].sort((left, right) => right.degree - left.degree || left.label.localeCompare(right.label));
     adjacency = new Map([...next.keys()].map((id) => [id, new Set<string>()]));
     for (const edge of visible.edges) {
       adjacency.get(edge.source)?.add(edge.target);
       adjacency.get(edge.target)?.add(edge.source);
     }
-    if (hovered && !next.has(hovered.id)) hovered = null;
-    if (inspected && !next.has(inspected.id)) inspected = null;
-    refreshNeighbours();
+    untrack(() => {
+      if (hovered && !next.has(hovered.id)) hovered = null;
+      if (preview && !next.has(preview.id)) preview = null;
+      if (inspected && !next.has(inspected.id)) inspected = null;
+      refreshNeighbours();
+    });
     graph.graphData({ nodes: [...next.values()], links: visible.edges.map((edge) => ({ ...edge })) });
+    queueHoverFlush();
     if (!fitted && visible.nodes.length) {
       fitted = true;
       requestFit(800);
@@ -651,7 +705,7 @@
   $effect(() => {
     void [settings.nodeSize, settings.sizeByLinks, settings.linkWidth, settings.arrows, settings.labelZoom, settings.labels];
     if (!graph) return;
-    graph.linkWidth(graph.linkWidth()).linkDirectionalArrowLength(graph.linkDirectionalArrowLength()).linkLineDash(graph.linkLineDash());
+    graph.linkWidth(graph.linkWidth()).linkDirectionalArrowLength(graph.linkDirectionalArrowLength());
     redraw();
   });
 
@@ -661,12 +715,17 @@
   });
 
   $effect(() => {
+    void settings.controlsOpen;
+    if (ready) requestFit(250);
+  });
+
+  $effect(() => {
     if (focusId && !model.nodes.some((node) => node.id === focusId)) focusId = null;
   });
 </script>
 
 <div class="flex h-full w-full flex-col overflow-hidden bg-zinc-950 min-[900px]:flex-row">
-  <section class="relative min-h-0 flex-1 overflow-hidden" aria-label="Graph">
+  <section class="relative min-h-0 flex-1 overflow-hidden" aria-label="Graph" onpointerleave={leaveGraph}>
     <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div
       bind:this={container}
@@ -676,6 +735,8 @@
       tabindex="0"
       onkeydown={canvasKey}
       oncontextmenu={(event) => event.preventDefault()}
+      onpointerenter={enterCanvas}
+      onpointermove={handlePointerMove}
     ></div>
 
     <div class="pointer-events-none absolute top-3 left-3 flex flex-col gap-1">
@@ -746,6 +807,17 @@
       >
         <RotateCcw size={15} />
       </button>
+      <button
+        class="flex h-7 w-7 items-center justify-center rounded-md text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 {settings.controlsOpen
+          ? 'text-violet-300'
+          : ''}"
+        title={settings.controlsOpen ? "Hide controls (C)" : "Show controls (C)"}
+        aria-label={settings.controlsOpen ? "Hide controls" : "Show controls"}
+        aria-pressed={settings.controlsOpen}
+        onclick={toggleControls}
+      >
+        <SlidersHorizontal size={15} />
+      </button>
     </div>
 
     {#if error}
@@ -792,33 +864,33 @@
       </div>
     {/if}
 
-    {#if inspected}
+    {#if cardNode}
       <div
         class="absolute bottom-12 left-3 w-64 max-w-[calc(100%-1.5rem)] rounded-lg border border-zinc-700 bg-zinc-900/95 p-3 shadow-xl backdrop-blur"
       >
-        <div class="text-[10px] font-semibold tracking-wide text-zinc-400 uppercase">{KIND_LABELS[inspected.kind]}</div>
-        <div class="mt-1 text-sm font-medium break-words text-zinc-100">{inspected.label}</div>
-        <div class="mt-0.5 text-xs break-all text-zinc-400">{inspected.path || (vault.info?.name ?? "Vault")}</div>
+        <div class="text-[10px] font-semibold tracking-wide text-zinc-400 uppercase">{KIND_LABELS[cardNode.kind]}</div>
+        <div class="mt-1 text-sm font-medium break-words text-zinc-100">{cardNode.label}</div>
+        <div class="mt-0.5 text-xs break-all text-zinc-400">{cardNode.path || (vault.info?.name ?? "Vault")}</div>
         <div class="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-400">
-          <span>{inspected.degree} {inspected.degree === 1 ? "connection" : "connections"}</span>
-          {#if inspected.tag}<span class="text-emerald-300">#{inspected.tag}</span>{/if}
+          <span>{cardNode.degree} {cardNode.degree === 1 ? "connection" : "connections"}</span>
+          {#if cardNode.tag}<span class="text-emerald-300">#{cardNode.tag}</span>{/if}
         </div>
         <div class="mt-3 flex gap-2">
-          {#if openable(inspected)}
+          {#if openable(cardNode)}
             <button
               class="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-violet-600 px-2 py-1.5 text-xs font-medium text-white hover:bg-violet-500"
-              onclick={() => inspected && openNode(inspected)}
+              onclick={() => cardNode && openNode(cardNode)}
             >
               <ExternalLink size={13} />
-              {openLabel(inspected)}
+              {openLabel(cardNode)}
             </button>
           {/if}
           <button
             class="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-zinc-700 px-2 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800"
-            onclick={() => inspected && toggleFocus(inspected)}
+            onclick={() => cardNode && toggleFocus(cardNode)}
           >
             <Crosshair size={13} />
-            {focusId === inspected.id ? "Unfocus" : "Focus"}
+            {focusId === cardNode.id ? "Unfocus" : "Focus"}
           </button>
         </div>
       </div>
@@ -850,16 +922,28 @@
     </div>
   </section>
 
-  <aside
-    class="flex h-[42%] max-h-[340px] min-h-[200px] w-full shrink-0 flex-col border-t border-zinc-800 bg-zinc-900/60 min-[900px]:h-full min-[900px]:max-h-none min-[900px]:w-72 min-[900px]:border-t-0 min-[900px]:border-l"
-    aria-label="Graph controls"
-  >
-    <header class="shrink-0 border-b border-zinc-800 px-4 py-3">
-      <h2 class="text-sm font-semibold text-zinc-100">Graph controls</h2>
-      <p class="mt-0.5 text-xs text-zinc-400">Changes apply live</p>
-    </header>
-    <div class="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-      <GraphOptions />
-    </div>
-  </aside>
+  {#if settings.controlsOpen}
+    <aside
+      class="flex h-[42%] max-h-[340px] min-h-[200px] w-full shrink-0 flex-col border-t border-zinc-800 bg-zinc-900/60 min-[900px]:h-full min-[900px]:max-h-none min-[900px]:w-72 min-[900px]:border-t-0 min-[900px]:border-l"
+      aria-label="Graph controls"
+    >
+      <header class="flex shrink-0 items-start justify-between gap-3 border-b border-zinc-800 px-4 py-3">
+        <div>
+          <h2 class="text-sm font-semibold text-zinc-100">Graph controls</h2>
+          <p class="mt-0.5 text-xs text-zinc-400">Changes apply live</p>
+        </div>
+        <button
+          class="rounded-md p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+          title="Hide controls"
+          aria-label="Hide controls"
+          onclick={toggleControls}
+        >
+          <X size={14} />
+        </button>
+      </header>
+      <div class="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        <GraphOptions />
+      </div>
+    </aside>
+  {/if}
 </div>

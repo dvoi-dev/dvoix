@@ -23,6 +23,8 @@ export const GRAPH_DEFAULTS = {
   unresolved: false,
   /** Hops kept around a focused note. */
   focusDepth: 1,
+  /** The control panel starts hidden so the graph gets the whole tab. */
+  controlsOpen: false,
   colorBy: "folder" as ColorBy,
   /** Bigger nodes for notes with more lines. */
   sizeByLinks: true,
