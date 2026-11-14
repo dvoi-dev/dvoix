@@ -18,7 +18,9 @@ A plugin is a GitHub repository with releases. Each release has these files (ass
 | `main.js` | yes | the code as an ES module, all in one file |
 | `styles.css` | no | styles, loaded as long as the plugin is on |
 
-The **tag of the release is the version** from `manifest.json`, without a `v` in front (e.g. `1.2.0`). The app first fetches `manifest.json` from the newest release (`releases/latest`), then `main.js` and `styles.css` from the release with this tag.
+The **tag of the release is the version** from `manifest.json`, without a `v` in front (e.g. `1.2.0`). The app does not take the newest release on its own: the plugin list pins one version and the SHA-256 of each file of it (see "Getting into the store"). The app downloads the files of that release, checks each against its checksum and installs nothing if one does not match. `styles.css` is only loaded when the list has a checksum for it.
+
+So **never change the files of a release** after it is in the list; the app would refuse them. A fix is a new release with a new version, followed by a pull request that pins it in the list. The release notes of the release are shown in the store as the changelog (as plain text).
 
 ### manifest.json
 
@@ -131,10 +133,18 @@ The list of plugins is in `registry.json` in [`dvoi-dev/dvoix-plugins`](https://
       "author": "damavoi",
       "description": "One sentence about what the plugin does.",
       "repo": "dvoi-dev/dvoix-plugin-hello",
-      "channel": "official"
+      "channel": "official",
+      "version": "1.0.0",
+      "sha256": {
+        "manifest.json": "eee00abfa7fe8647e7788ad33212349088e9c59f9b430b280a772b85d9ad8484",
+        "main.js": "22d898db66fddf68f912bc414badf392a3e14b83b6d59bdfe6b5ae3d4f72fa7d",
+        "styles.css": "eaa755baa590dc0751b0b1681554c893d9b1cb2719fb002c6457087ac17d5ff7"
+      }
     }
   ]
 }
 ```
 
 A community plugin is added via pull request with `"channel": "community"`. `"official"` only applies to repositories of `dvoi-dev`; for all others the app shows the plugin as a community plugin, even if the list says something else.
+
+`version` is the release the store installs, `sha256` the checksum of each of its files (lower-case hex): `manifest.json` and `main.js` always, `styles.css` if the release has one. An entry without them is skipped by the app. The check in `dvoix-plugins` (`node scripts/validate.mjs`) downloads the pinned files and prints the checksums they really have, so a wrong or missing one is easy to fill in. For every update: release first, then open a pull request that pins the new version.

@@ -7,15 +7,26 @@
       "author": "damavoi",
       "description": "Example plugin: shows a panel and a command and counts the notes in the vault.",
       "repo": "dvoi-dev/dvoix-plugin-hello",
-      "channel": "official"
+      "channel": "official",
+      "version": "1.0.0",
+      "sha256": {
+        "manifest.json": "eee00abfa7fe8647e7788ad33212349088e9c59f9b430b280a772b85d9ad8484",
+        "main.js": "22d898db66fddf68f912bc414badf392a3e14b83b6d59bdfe6b5ae3d4f72fa7d",
+        "styles.css": "eaa755baa590dc0751b0b1681554c893d9b1cb2719fb002c6457087ac17d5ff7"
+      }
     },
     {
       "id": "word-count",
       "name": "Word counter",
       "author": "someone",
       "description": "Shows how many words each note has.",
-      "repo": "jemand/dvoix-word-count",
-      "channel": "community"
+      "repo": "someone/dvoix-word-count",
+      "channel": "community",
+      "version": "0.3.1",
+      "sha256": {
+        "manifest.json": "3f0c1d7e5b2a49c8a6e1f0d2b7c4a9e8f1d3b5c7a2e4f6081b3d5f7a9c1e3b5d",
+        "main.js": "9a8b7c6d5e4f30211f2e3d4c5b6a79881a2b3c4d5e6f708192a3b4c5d6e7f809"
+      }
     }
   ]
 }
