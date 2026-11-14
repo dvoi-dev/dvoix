@@ -86,11 +86,12 @@ src/lib/components/      app frame: ribbon, side panel, right sidebar, file pane
 npm install              # once
 npm run check            # svelte-check: Svelte + TypeScript
 npm run build            # build the frontend (Vite)
+npm run test             # Vitest frontend tests
 cargo test --workspace   # Rust tests (core + Tauri crate)
 npm run tauri dev        # start the app (needs Tauri system dependencies)
 ```
 
-Before every commit, `npm run check`, `npm run build` and `cargo test --workspace` must pass. These exact three run in the CI (`.github/workflows/ci.yml`). On Linux the Rust build needs `libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev libxdo-dev libssl-dev`. If a check cannot run locally, say so explicitly instead of claiming success.
+Before every commit, `npm run check`, `npm run build`, `npm run test` and `cargo test --workspace` must pass. The CI (`.github/workflows/ci.yml`) runs these plus `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`. On Linux the Rust build needs `libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev libxdo-dev libssl-dev`. If a check cannot run locally, say so explicitly instead of claiming success.
 
 ## Conventions
 
@@ -101,6 +102,7 @@ Before every commit, `npm run check`, `npm run build` and `cargo test --workspac
 - **No new dependencies** without a good reason. If there is one, justify it in the PR.
 - **Small, focused changes.** One PR, one topic. No reformatting of unrelated files.
 - **Rust:** errors via `dvoix_core::Error` and `Result`, no `unwrap()` outside tests. New logic in the core gets tests in the same module (`#[cfg(test)] mod tests`, vault via `tempfile::tempdir()`).
+- **Frontend tests:** new logic in `src/lib/` gets Vitest tests next to it (`*.test.ts`). Pure logic and rune state run in Node; DOM tests use happy-dom.
 - **Keep the README current:** new feature, new file type, new file in `.dvoix/` or new plugin API → add a section to the README.
 
 ## Topic rules in `.agents/`

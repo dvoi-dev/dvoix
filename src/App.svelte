@@ -10,11 +10,13 @@
   import WindowControls from "./lib/components/WindowControls.svelte";
   import SettingsDialog from "./lib/components/settings/SettingsDialog.svelte";
   import ToastContainer from "./lib/components/ToastContainer.svelte";
+  import UpdateBanner from "./lib/components/UpdateBanner.svelte";
   import { flushConfig } from "./lib/config";
   import { plugins } from "./lib/plugins";
   import { settings } from "./lib/settings.svelte";
   import { ui } from "./lib/ui.svelte";
   import { hotkeys } from "./lib/hotkeys.svelte";
+  import { updater } from "./lib/updater.svelte";
   import { vault } from "./lib/vault.svelte";
   import { appWindow, dragRegion } from "./lib/window.svelte";
 
@@ -25,6 +27,7 @@
   onMount(() => {
     void appWindow.init();
     vault.init().finally(() => (ready = true));
+    void updater.init();
     // Save pending edits and settings before the window closes.
     const beforeUnload = () => {
       void vault.flush();
@@ -139,6 +142,7 @@
     <overlay.component />
   {/each}
   <SettingsDialog />
+  <UpdateBanner />
 {:else}
   <div class="flex h-full flex-col">
     <div class="flex h-9 shrink-0 justify-end" use:dragRegion><WindowControls /></div>

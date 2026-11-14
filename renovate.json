@@ -1,0 +1,36 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "timezone": "Europe/Berlin",
+  "schedule": ["before 6am on monday"],
+  "rangeStrategy": "bump",
+  "semanticCommits": "disabled",
+  "minimumReleaseAge": "3 days",
+  "packageRules": [
+    {
+      "description": "Keep the Tauri shell, its npm packages and its Rust plugins in step.",
+      "groupName": "tauri",
+      "matchPackageNames": ["@tauri-apps/**", "tauri", "tauri-build", "tauri-plugin-*"]
+    },
+    {
+      "description": "CodeMirror and its Lezer parsers release together.",
+      "groupName": "codemirror",
+      "matchPackageNames": ["@codemirror/**", "@lezer/**", "codemirror"]
+    },
+    {
+      "description": "The Svelte toolchain moves together.",
+      "groupName": "svelte",
+      "matchPackageNames": ["svelte", "svelte-check", "@sveltejs/**", "@tsconfig/svelte"]
+    },
+    {
+      "description": "Routine updates merge themselves once the CI is green; major updates stay a manual decision. Renovate merges itself (not GitHub auto-merge), because it waits for the checks even without branch protection.",
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true,
+      "platformAutomerge": false
+    }
+  ],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on the first day of the month"]
+  }
+}

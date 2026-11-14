@@ -11,7 +11,7 @@ A desktop app for notes, project management, tracking, and whatever comes later.
 - Right sidebar: a narrow icon bar on the far right with the outline of the open note and other panels next to it, resizable by dragging its edge. The button in the title row, next to the window buttons, shows and hides it (Ctrl/Cmd + ] does the same). A note is docked into it by dragging its tab from the tab bar into the column, and the panels are rearranged by dragging their header
 - Custom title bar on Windows and Linux: no bright system frame; the tab bar and the top row of the sidebar move the window (double-click maximizes); minimize, maximize and close sit on the right next to the tabs. Narrow, dark scrollbars everywhere in the app
 - The file explorer sorts naturally: `2 - Notes` comes before `10 - Archive`
-- File explorer with a folder tree: expand and collapse folders (remembered), right-click menu to create, rename and delete (deleted items go to `.trash/` in the vault), drag and drop files into folders, plus a toast with **Undo** after deleting, moving, or renaming
+- File explorer with a folder tree: expand and collapse folders (remembered), right-click menu to create, rename and delete (deleted items go to `.trash/` in the vault), drag and drop files into folders. Keyboard: arrows move, Left/Right collapse/expand, Enter/Space opens, F2 renames, Home/End jump to the first/last row, plus a toast with **Undo** after deleting, moving, or renaming
 - Trash panel in the sidebar: browse deleted files and folders in `.trash/`, preview notes, restore them to their original paths (with copy fallback on conflicts), or delete them permanently
 - Tabs: clicking in the file explorer opens in the active tab, Ctrl/Cmd + click or middle click opens in a new one; drag tabs to reorder, close them with middle click or ×. Pin tabs so they are not replaced by the next opened file; pinned tabs can still be closed explicitly. Split the editor to the right (Ctrl/Cmd + \) to work on two notes side by side. Open tabs, pins and the split are remembered per vault
 - Quick switcher (Ctrl/Cmd + O) with fuzzy search over all files: `mtg plan` finds `Projects/Meeting-Planning`. Enter opens, Ctrl + Enter opens in a new tab, and if the note does not exist it is created
@@ -36,6 +36,8 @@ A desktop app for notes, project management, tracking, and whatever comes later.
 - Graph view (Ctrl/Cmd + G or the network icon in the icon bar) in its own tab: notes as dots, connected by links, by their folders (folders as their own nodes) and/or by shared tags (tags as nodes or as direct lines). The graph starts with the whole tab; the controls open beside it (below it in narrow windows) via the sliders button or `C` and can be hidden again: filters (`projects #idea -archive`), single notes, attachments and missing notes on/off, colors by folder or tag with a legend, size by number of connections, labels, arrows, line width, the zoom level from which titles appear, and the layout forces. Hovering highlights the neighbors and previews the note in a card with the path, tag and connection count; the highlight follows the pointer, while the card stays available until the pointer leaves the graph or the background is clicked. Click opens the note in a new tab, right-click or the card's Focus button keeps only the note's neighborhood (1–3 hops). The toolbar zooms, fits, pauses and restarts the layout; on the focused canvas, `+`/`-` zoom, `0` fits, Space pauses, `C` toggles the controls and Esc clears the focus
 - Basic functions are always on: file explorer, search, tags, backlinks, link suggestions, clickable checkboxes, quick switcher, command palette, document search, tabs, split view, pinned tabs, views, status bar, formatting toolbar and trash. Optional functions are core plugins that can each be turned off in the settings (gear icon at the bottom of the icon bar, or Ctrl/Cmd + ,): tasks, canvas, graph, the right sidebar and hidden files (folders such as `.obsidian`, off at first)
 - Plugin store in the settings: search, install, update and remove additional plugins. Official plugins work immediately; community plugins only after a separate switch with a warning (see "Plugin store" below)
+- App updates: Settings → About shows the running version and checks GitHub releases. Installing an update first saves all pending changes, then downloads it and restarts into it; a failed install stays in the banner with a retry. The update feed only serves published releases
+- Accessibility: dialogs keep the keyboard focus inside and give it back on close, the file tree is fully keyboard-navigable, and animations respect the system's "reduce motion" setting
 - Settings: editor (line length, line numbers, spellcheck), appearance (themes: Dark, Midnight, Slate, Light; preset or custom hex accent colors; editor and interface fonts; font size sliders; CSS snippets from `.dvoix/snippets/`), rebindable keyboard shortcuts with conflict handling, and separate options per feature or plugin
 - All settings of a vault live inside the vault under `.dvoix/` (see below), so they move along when you copy or sync the folder
 - Projects and Git are official plugins in the plugin store: [dvoix-projects](https://github.com/dvoi-dev/dvoix-projects) and [dvoix-git](https://github.com/dvoi-dev/dvoix-git)
@@ -215,14 +217,36 @@ npm run tauri dev      # start the app with hot reload
 npm run tauri build    # build the installer
 ```
 
+A local `tauri build` makes plain installers without update bundles, so it needs no signing key. The release workflow adds `src-tauri/tauri.release.conf.json`, which turns on the signed update bundles.
+
 After a pull that brings new dependencies, run `npm install` once. `npm run dev`, `npm run check` and `npm run build` check first whether all packages from `package.json` are installed, and say what is missing – instead of failing later in Vite with "Failed to resolve import …".
 
 To check:
 
 ```sh
 npm run check          # Svelte/TypeScript
+npm run build          # frontend build
+npm run test           # Vitest frontend tests
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace # Rust core
 ```
+
+Frontend tests live next to the code as `*.test.ts` (Vitest). Pure logic and rune state run in Node; DOM tests use happy-dom.
+
+## Releases
+
+The app version lives in `package.json`, `Cargo.toml` and `src-tauri/tauri.conf.json`. Bump all of them together:
+
+```sh
+npm run bump 0.3.0
+```
+
+`npm run bump` also updates `Cargo.lock`. Commit the bump, merge it to `main`, then push a tag `v0.3.0`. The `Release` workflow runs the CI checks, builds signed bundles for Windows, macOS (universal) and Linux, and uploads them together with `latest.json` to a draft GitHub release. Publish the draft to make it the update feed for installed apps.
+
+Required repository secrets: `TAURI_SIGNING_PRIVATE_KEY` (the contents of `~/.tauri/dvoix-updater.key`) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (empty for the generated key). The matching public key is already in `src-tauri/tauri.conf.json`; never commit the private key. Optional Apple secrets (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) sign and notarize the macOS bundle; without them the app is ad-hoc signed.
+
+Renovate (`renovate.json`) keeps npm, Cargo and GitHub Actions dependencies up to date. Install the Renovate GitHub App on the repository to activate it.
 
 ## Next steps (ideas)
 

@@ -121,8 +121,14 @@ fn smooth_scrolling(app: &tauri::App) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+    // The updater downloads signed releases from GitHub; the process plugin
+    // restarts the app after an update was installed. Desktop only.
+    #[cfg(desktop)]
+    let builder = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init());
+    builder
         .setup(|app| {
             app.manage(AppState::default());
             #[cfg(target_os = "linux")]
