@@ -43,7 +43,7 @@ So **never change the files of a release** after it is in the list; the app woul
 
 | Permission | allows |
 | --- | --- |
-| `vault:read` | `dvoix.vault.list()`, `dvoix.vault.read(path)` |
+| `vault:read` | `dvoix.vault.list()`, `dvoix.vault.read(path)`, `dvoix.vault.onChange(fn)`, `onSave(fn)`, `onCreate(fn)`, `onRename(fn)`, `onDelete(fn)` |
 | `vault:write` | `dvoix.vault.write(path, content)` |
 | `editor` | `dvoix.registerEditorExtension(...)` |
 | `process` | `dvoix.process.spawn(...)`: run programs on the computer, started in the vault folder |

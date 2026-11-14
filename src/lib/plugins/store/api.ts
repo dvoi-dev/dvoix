@@ -14,7 +14,7 @@ import * as cmView from "@codemirror/view";
 import * as cmMerge from "@codemirror/merge";
 import type { Extension } from "@codemirror/state";
 import { api, type PluginPermission, type StoreManifest, type VaultEntry } from "../../api";
-import { appEvents, type AppEvents } from "../../events";
+import { type AppEvents } from "../../events";
 import { vault, type VaultChangeKind } from "../../vault.svelte";
 import type { CommandSpec, Dispose, PluginContext } from "../types";
 import { iconComponent, mountComponent } from "./component";
@@ -185,12 +185,7 @@ export function createApi(ctx: PluginContext, manifest: StoreManifest): DvoixPlu
       },
       write: async (path, content) => {
         need("vault:write");
-        const exists = vault.entries.some((e) => e.path === path && !e.isDir);
-        if (exists) await api.writeFile(path, content);
-        else {
-          const entry = await api.createFile(path, content);
-          appEvents.emit("file-create", { path: entry.path, isDir: false });
-        }
+        await vault.writePluginFile(path, content);
       },
       openFile: (path) => vault.openFile(path),
       onChange: (fn) => {
@@ -257,8 +252,10 @@ export function createApi(ctx: PluginContext, manifest: StoreManifest): DvoixPlu
       activeFile: () => vault.activeTab?.path ?? null,
       onActiveFileChange: (fn) => {
         // Switching between two views is a change for the app, not for
-        // `activeFile()`, which is null for both.
-        let last = vault.activeTab?.path ?? null;
+        // `activeFile()`, which is null for both. When subscribed while the
+        // vault is opening (`vault.info` still null), `last` starts unset so
+        // the initial `active-file-change` after `restoreTabs` always fires.
+        let last: string | null | undefined = vault.info ? (vault.activeTab?.path ?? null) : undefined;
         return ctx.on("active-file-change", ({ path }) => {
           if (path === last) return;
           last = path;

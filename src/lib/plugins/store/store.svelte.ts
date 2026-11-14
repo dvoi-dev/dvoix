@@ -151,7 +151,10 @@ class PluginStore {
   reset() {
     this.installed = [];
     this.file = emptyFile();
+    this.registry = null;
+    this.registryError = null;
     this.manifests = {};
+    this.changelogs = {};
     this.busy = {};
     this.errors = {};
   }
@@ -201,7 +204,7 @@ class PluginStore {
   /** The manifest of the release the list pins for `id`, once fetched. */
   releaseManifest(id: string): StoreManifest | undefined {
     const m = this.manifests[id];
-    const entry = this.registry?.find((e) => e.id === id);
+    const entry = this.entryFor(id) ?? this.registry?.find((e) => e.id === id);
     return m && entry && m.version === entry.version ? m : undefined;
   }
 
@@ -283,14 +286,15 @@ class PluginStore {
    * GitHub names are case-insensitive, so the match is too. An official entry
    * also matches when the repo moved (e.g. from a user account into the
    * `dvoi-dev` org): official repos are only ever `dvoi-dev`, so this cannot
-   * hand the plugin to a stranger. A community plugin whose repo changed stays
-   * without updates until it is reinstalled.
+   * hand the plugin to a stranger. A community plugin whose repo changed (or a
+   * plugin copied into the folder by hand) stays without updates until it is
+   * installed from the store.
    */
   entryFor(id: string): RegistryEntry | undefined {
     const repo = this.file.plugins[id]?.repo?.toLowerCase();
     const forId = this.registry?.filter((e) => e.id === id) ?? [];
     return (
-      forId.find((e) => !repo || e.repo.toLowerCase() === repo) ??
+      (repo ? forId.find((e) => e.repo.toLowerCase() === repo) : undefined) ??
       forId.find((e) => e.channel === "official")
     );
   }

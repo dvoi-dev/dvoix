@@ -286,7 +286,9 @@ impl Vault {
     }
 
     pub fn entry(&self, rel: &str) -> Result<VaultEntry> {
-        self.entry_for(rel, &self.resolve(rel)?)
+        let abs = self.resolve(rel)?;
+        let norm = self.relative(&abs);
+        self.entry_for(norm.as_deref().unwrap_or(rel), &abs)
     }
 
     pub fn read(&self, rel: &str) -> Result<String> {
@@ -470,7 +472,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vault = Vault::open(dir.path()).unwrap();
         vault.write("projects/alpha.md", "# Alpha").unwrap();
-        vault.write("inbox.md", "hi").unwrap();
+        let entry = vault.write("./inbox.md", "hi").unwrap();
+        assert_eq!(entry.path, "inbox.md");
 
         let paths: Vec<_> = vault.list().unwrap().into_iter().map(|e| e.path).collect();
         assert_eq!(paths, vec!["inbox.md", "projects", "projects/alpha.md"]);

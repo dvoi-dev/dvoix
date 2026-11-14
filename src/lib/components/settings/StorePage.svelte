@@ -80,6 +80,23 @@
     }
   }
 
+  /**
+   * Updates from the "Installed" list when the permissions stay the same;
+   * opens the details page first when the new version asks for a new permission.
+   */
+  async function updateFromList(id: string) {
+    const target = pluginStore.entryFor(id);
+    const current = pluginStore.installedManifest(id);
+    if (!target || !current) return;
+    const next = pluginStore.releaseManifest(id) ?? (await pluginStore.fetchManifest(target));
+    if (!next) return;
+    if (next.permissions.some((p) => !current.permissions.includes(p))) {
+      selected = id;
+      return;
+    }
+    await pluginStore.update(id);
+  }
+
   function setCommunity(on: boolean) {
     if (on) confirmCommunity = true;
     else void pluginStore.setAllowCommunity(false);
@@ -151,7 +168,14 @@
       <p class="mt-1 text-xs text-zinc-500">{errorOf(id) ? "Could not be loaded." : "Loading …"}</p>
     {:else if latest.permissions.length}
       <ul class="mt-1 list-disc pl-5 text-xs text-zinc-300">
-        {#each latest.permissions as p (p)}<li>{PERMISSION_LABELS[p]}</li>{/each}
+        {#each latest.permissions as p (p)}
+          <li>
+            {PERMISSION_LABELS[p]}
+            {#if installed && !installed.permissions.includes(p)}
+              <span class="ml-1 rounded bg-amber-500/15 px-1 py-px text-[10px] font-medium text-amber-300">New in {entry.version}</span>
+            {/if}
+          </li>
+        {/each}
       </ul>
     {:else}
       <p class="mt-1 text-xs text-zinc-400">None: the plugin does not want access to your files or the editor.</p>
@@ -182,7 +206,7 @@
         </button>
       {:else}
         {#if pluginStore.hasUpdate(id)}
-          <button class={primary} disabled={!!busy || pluginStore.needsNewerApp(latest)} onclick={() => pluginStore.update(id)}>
+          <button class={primary} disabled={!!busy || !latest || pluginStore.needsNewerApp(latest)} onclick={() => pluginStore.update(id)}>
             <RefreshCw size={13} /> Update to {entry.version}
           </button>
         {/if}
@@ -304,7 +328,7 @@
       <Setting name="{p.manifest.name} {p.manifest.version}" description={p.manifest.description}>
         <div class="flex items-center gap-3">
           {#if pluginStore.hasUpdate(id)}
-            <button class="text-xs text-violet-300 hover:underline" disabled={!!pluginStore.busy[id]} onclick={() => pluginStore.update(id)}>
+            <button class="text-xs text-violet-300 hover:underline" disabled={!!pluginStore.busy[id]} onclick={() => updateFromList(id)}>
               Update to {pluginStore.entryFor(id)?.version}
             </button>
           {/if}

@@ -157,7 +157,7 @@ class VaultStore {
   private unlistenViews: (() => void) | undefined;
   private stopActiveWatch: (() => void) | undefined;
   /** What `active-file-change` last said, so it only fires on a real change. */
-  private announced: { path: string | null; view: string | null } = { path: null, view: null };
+  private announced: { path: string | null; view: string | null } | null = null;
   private tearingDown = false;
 
   async init() {
@@ -169,9 +169,10 @@ class VaultStore {
     // so watching those two catches all of them, once per change.
     this.stopActiveWatch = $effect.root(() => {
       $effect(() => {
+        if (!this.info || this.tearingDown) return;
         const next = { path: this.openPath, view: this.openView };
         untrack(() => {
-          if (next.path === this.announced.path && next.view === this.announced.view) return;
+          if (this.announced && next.path === this.announced.path && next.view === this.announced.view) return;
           this.announced = next;
           appEvents.emit("active-file-change", next);
         });
@@ -195,17 +196,18 @@ class VaultStore {
     try {
       await this.teardown();
       const info = await api.openVault(path);
-      // Settings, workspace and plugins of this vault, all from `<vault>/.dvoix/`.
-      await Promise.all([settings.load(), ui.load(info.path)]);
+      // Settings, workspace and the list of the vault before the plugins load,
+      // so `vault.list()` and `vault.write()` already know the vault in `onload`.
+      await Promise.all([settings.load(), ui.load(info.path), this.refresh()]);
       this.openPath = null;
+      this.openView = null;
+      this.announced = null;
       this.content = "";
       this.dirty = false;
       this.error = null;
       await plugins.loadVault();
       await pluginStore.loadVault();
       this.info = info;
-      // The tabs need the list of the vault to drop vanished files: list first.
-      await this.refresh();
       await this.restoreTabs();
     } catch (e) {
       this.error = String(e);
@@ -238,6 +240,7 @@ class VaultStore {
     this.entriesVersion++;
     this.openPath = null;
     this.openView = null;
+    this.announced = null;
     this.tabs = [];
     this.recent = [];
     this.navHistory = [];
@@ -739,6 +742,33 @@ class VaultStore {
     const fresh = await api.readFile(path).catch(() => null);
     // The tab may have moved on while the file was read.
     if (this.openPath === path && fresh !== null && fresh !== this.content && !this.dirty) this.content = fresh;
+  }
+
+  /**
+   * Writes `content` to `path` for a plugin (`dvoix.vault.write`), creating
+   * the file if it does not exist yet.
+   */
+  async writePluginFile(path: string, content: string): Promise<void> {
+    if (!this.entryAt(path)) {
+      try {
+        const entry = await api.createFile(path, content);
+        if (!entry.path.split("/").some((p) => p.startsWith("."))) {
+          this.insertEntry(entry);
+          this.appliedOwnChange([entry.path], isNote(entry.path));
+        }
+        appEvents.emit("file-create", { path: entry.path, isDir: false });
+        return;
+      } catch (e) {
+        if (!String(e).startsWith("path already exists:")) throw e;
+      }
+    }
+    const entry = await api.writeFile(path, content);
+    const found = this.fileByPath.get(entry.path.toLowerCase());
+    if (found) {
+      found.size = entry.size;
+      found.modified = entry.modified;
+      this.entriesVersion++;
+    }
   }
 
   creatable(): FileType[] {
