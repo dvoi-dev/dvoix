@@ -1,10 +1,11 @@
 // Measures the costs of the panels: the lookups of links, the tree of the
-// vault and the suggestions of links.
+// vault, the suggestions of links and the graph after a change.
 //
 //   node scripts/bench-panels.mjs
 //
 // The numbers are the ones in PERF.md.
 import { buildTree, mergeEntries, FOLDER_PAGE, visibleChildren } from "../src/lib/features/file-explorer/tree.ts";
+import { buildGraph, patchGraphData, sameShape } from "../src/lib/plugins/core/graph/model.ts";
 
 /** A vault of 20 000 files in 100 folders. */
 function makeEntries(count, folders) {
@@ -269,6 +270,40 @@ function benchFolderWindow(children) {
   if (visibleChildren(children.slice(0, 10), FOLDER_PAGE).length !== 10) throw new Error("a small folder is cut");
 }
 
+// ---------------------------------------------------------------- the graph
+
+/** The graph data of the vault of `makeEntries`: every note links to the next three. */
+function makeGraphData(entries) {
+  const notes = entries.filter((e) => !e.isDir);
+  const data = { notes: [], links: [] };
+  notes.forEach((e, i) => {
+    data.notes.push({ path: e.path, title: e.name.slice(0, -3), tags: [`tag-${i % 50}`] });
+    for (let k = 1; k <= 3; k++) data.links.push({ source: e.path, target: notes[(i + k) % notes.length].name.slice(0, -3) });
+  });
+  return data;
+}
+
+function benchGraph(entries) {
+  const data = makeGraphData(entries);
+  const settings = { links: true, folders: false, tags: false, tagMode: "nodes", filter: "", orphans: true, attachments: false, unresolved: true };
+  const n = 10;
+  // One note was saved: the patch puts its answer from graph_notes in place.
+  const path = data.notes[500].path;
+  const part = { notes: [data.notes[500]], links: data.links.filter((l) => l.source === path) };
+  let t = performance.now();
+  for (let i = 0; i < n; i++) patchGraphData(data, [path], part);
+  console.log(`  patch one note into the data: ${((performance.now() - t) / n).toFixed(2)} ms`);
+  t = performance.now();
+  let model;
+  for (let i = 0; i < n; i++) model = buildGraph(data, entries, settings, "Vault");
+  console.log(`  build the model (${model.nodes.length} nodes, ${model.edges.length} lines): ${((performance.now() - t) / n).toFixed(2)} ms`);
+  const patched = buildGraph(patchGraphData(data, [path], part), entries, settings, "Vault");
+  if (!sameShape(patched, model)) throw new Error("a patch that changes no link must keep the shape");
+  t = performance.now();
+  for (let i = 0; i < n; i++) sameShape(patched, model);
+  console.log(`  compare the shape with the shown one: ${((performance.now() - t) / n).toFixed(2)} ms`);
+}
+
 const entries = makeEntries(20000, 100);
 const extra = [{ path: ".hidden/notes.md", name: "notes.md", extension: "md", isDir: false, size: 10, modified: 1 }];
 const recent = ["folder-3/note-5.md", "folder-7/note-9.md"];
@@ -284,3 +319,5 @@ console.log("the task filter (5000 tasks):");
 benchTaskFilter(makeTasks(5000));
 console.log("a folder with 5000 entries:");
 benchFolderWindow(buildTree(makeEntries(5000, 1))[0].children);
+console.log("the graph after a change of one note:");
+benchGraph(entries);

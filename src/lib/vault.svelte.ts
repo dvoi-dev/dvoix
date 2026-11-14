@@ -8,6 +8,8 @@ import { flushConfig } from "./config";
 import { plugins } from "./plugins/manager.svelte";
 import { pluginStore } from "./plugins/store/store.svelte";
 import { settings } from "./settings.svelte";
+import { snippets } from "./snippets.svelte";
+import { toasts } from "./toast.svelte";
 import { ui } from "./ui.svelte";
 
 const SAVE_DELAY_MS = 400;
@@ -113,6 +115,8 @@ class VaultStore {
   });
   /** Moves when the list of the vault changes, so that caches know they are stale. */
   entriesVersion = $state(0);
+  /** Moves whenever `.trash/` changes through in-app trash, restore, or delete operations. */
+  trashVersion = $state(0);
 
   /** The files of the vault by their path, for the lookups of links and of changes. */
   private fileByPath = $derived.by(() => {
@@ -199,6 +203,7 @@ class VaultStore {
       // Settings, workspace and the list of the vault before the plugins load,
       // so `vault.list()` and `vault.write()` already know the vault in `onload`.
       await Promise.all([settings.load(), ui.load(info.path), this.refresh()]);
+      await snippets.refresh();
       this.openPath = null;
       this.openView = null;
       this.announced = null;
@@ -226,6 +231,8 @@ class VaultStore {
     this.selfWrites = [];
     await this.flush();
     ui.unload(); // stop saving the workspace: unloading plugins (e.g. tabs) must not change it
+    snippets.clear();
+    toasts.clear();
     await flushConfig();
     this.tearingDown = true;
     try {
@@ -238,6 +245,7 @@ class VaultStore {
     this.info = null;
     this.entries = [];
     this.entriesVersion++;
+    this.trashVersion++;
     this.openPath = null;
     this.openView = null;
     this.announced = null;
@@ -821,18 +829,29 @@ class VaultStore {
   async rename(from: string, newName: string) {
     const parent = from.includes("/") ? from.slice(0, from.lastIndexOf("/") + 1) : "";
     if (!newName.trim()) return;
-    await this.moveTo(from, `${parent}${newName.trim()}`);
+    await this.moveTo(from, `${parent}${newName.trim()}`, { verb: "rename" });
   }
 
   /** Moves a file or folder into another folder ("" = vault root), e.g. by drag & drop. */
   async move(from: string, folder: string) {
     const name = from.split("/").pop()!;
     if (folder === from || folder.startsWith(`${from}/`)) return; // not into itself
-    await this.moveTo(from, folder ? `${folder}/${name}` : name);
+    const to = folder ? `${folder}/${name}` : name;
+    if (to === from) return;
+    await this.moveTo(from, to, { verb: "move" });
   }
 
-  private async moveTo(from: string, to: string) {
-    if (to === from) return;
+  private async undoMove(from: string, to: string) {
+    const ok = await this.moveTo(from, to, { undo: false });
+    if (!ok && this.error) toasts.error(this.error);
+  }
+
+  private async moveTo(
+    from: string,
+    to: string,
+    opts: { undo?: boolean; verb?: "move" | "rename" } = {},
+  ): Promise<boolean> {
+    if (to === from) return true;
     try {
       await this.flush();
       const entry = await api.renameEntry(from, to);
@@ -865,20 +884,34 @@ class VaultStore {
         movedEntries.some((e) => e.isDir || isNote(e.path)),
       );
       appEvents.emit("file-rename", { from, to, isDir: entry.isDir });
+      if (opts.undo !== false) {
+        const oldName = from.split("/").pop() ?? from;
+        const newName = to.split("/").pop() ?? to;
+        const destFolder = to.includes("/") ? to.slice(0, to.lastIndexOf("/")) : "";
+        const message =
+          opts.verb === "rename"
+            ? `Renamed "${oldName}" to "${newName}"`
+            : `Moved "${oldName}" to ${destFolder ? `"${destFolder}"` : "vault root"}`;
+        toasts.undo(message, () => this.undoMove(to, from));
+      }
+      return true;
     } catch (e) {
       this.error = String(e);
+      return false;
     }
   }
 
-  async trash(path: string) {
+  async trash(path: string, opts: { undo?: boolean } = {}) {
     try {
       const p = this.openPath;
+      const wasActiveFile = p === path;
       if (p === path || p?.startsWith(`${path}/`)) {
         // Don't let a pending save recreate the file after it was trashed.
         clearTimeout(this.saveTimer);
         this.dirty = false;
       }
-      await api.trashEntry(path);
+      const trashed = await api.trashEntry(path);
+      this.trashVersion++;
       // The entry goes right away; a new note may take its name again.
       const removed = this.entries.filter((e) => e.path === path || e.path.startsWith(`${path}/`));
       this.removeEntries(path);
@@ -888,9 +921,44 @@ class VaultStore {
         removed.some((e) => e.isDir || isNote(e.path)),
       );
       appEvents.emit("file-delete", { path, isDir: removed.some((e) => e.path === path && e.isDir) });
+      if (opts.undo !== false) {
+        const label = path.split("/").pop() ?? path;
+        toasts.undo(`Moved "${label}" to trash`, async () => {
+          try {
+            await this.restoreTrash(trashed.name, trashed.originalPath, { reopenIfFile: wasActiveFile });
+          } catch (e) {
+            toasts.error(String(e));
+          }
+        });
+      }
     } catch (e) {
       this.error = String(e);
     }
+  }
+
+  async restoreTrash(
+    trashName: string,
+    target: string | null = null,
+    opts: { renameOnConflict?: boolean; reopenIfFile?: boolean } = {},
+  ): Promise<VaultEntry> {
+    const entry = await api.restoreTrashEntry(trashName, target, opts.renameOnConflict ?? false);
+    this.trashVersion++;
+    await this.refresh([entry.path]);
+    this.note(this.changes.files, [entry.path]);
+    if (entry.isDir || isNote(entry.path)) this.note(this.changes.notes, [entry.path]);
+    if (entry.path.includes("/")) ui.reveal(entry.path);
+    if (opts.reopenIfFile && !entry.isDir) await this.openFile(entry.path);
+    return entry;
+  }
+
+  async deleteTrashed(trashName: string) {
+    await api.deleteTrashEntry(trashName);
+    this.trashVersion++;
+  }
+
+  async emptyTrash() {
+    await api.emptyTrash();
+    this.trashVersion++;
   }
 }
 

@@ -458,6 +458,52 @@ per 8 kB read; it is collected per stream over 25 ms now (nothing is lost
 when the streams switch). The exit was polled every 50 ms; the reaper waits
 on the process now, and a kill goes through the stored handle or the pid.
 
+### The graph after a change
+
+Every saved note read the whole graph again (all notes, all tags, all links),
+sent it over to the webview and handed it to force-graph, which restarts its
+layout from full heat on every new set of data. In a big vault every save
+cost the full read and made the whole graph move.
+
+**Only the changed notes are read.** The new command `graph_notes` answers
+for the paths of a burst of changes: those of them that are still notes, with
+their tags and outgoing links. The view patches its copy with it
+(`patchGraphData`). A link belongs to the note it is written in, so the
+links of the other notes stay right. The whole vault is still read the first
+time, after an error, for a change that names a folder (it can hold any
+number of notes) and for more than 400 changed notes at once.
+
+From `index_bench`, in milliseconds:
+
+| | 20 000 notes | 80 000 notes |
+| --- | --- | --- |
+| the whole graph (as before) | 17.10 | 75.31 |
+| the graph of one note | 0.05 | 0.08 |
+| the graph of 100 notes | 0.89 | 1.01 |
+
+**The layout keeps going.** The patch keeps the order of the data, so a
+model built from it lines up with the one shown before, place by place.
+When no node and no line changed (a save that only changed text, the most
+common case), the view updates the nodes it already has and draws again,
+without handing force-graph any new data. A new node starts next to a
+neighbour that already has a place instead of at the origin.
+
+From `node scripts/bench-panels.mjs`, 20 000 notes with three links each,
+in milliseconds:
+
+| | |
+| --- | --- |
+| patch one note into the data | 2.0 |
+| compare the shape with the one shown | 0.3 |
+| build the model (still for the whole vault, see below) | 44–56 |
+
+A first comparison by a set of string keys per line cost 24 ms, half of
+building the model. Going place by place costs 0.3 ms, because no key has to
+be built.
+
+The graph data is raw state now: it is only ever replaced, so there is no
+need for a deep proxy over every note and link.
+
 ## The attempts
 
 ### Kept: the search row takes the rowid of its note
@@ -622,7 +668,11 @@ that actually grows with the vault.
   filter them themselves. That costs 19 ms and 4 ms with 20 000 notes and
   grows with the vault. Moving the filter into the query would change the
   command, so it is a separate job.
-- The graph reads all notes and all links at once (27 ms with 20 000 notes).
+- The graph view builds its model (nodes, lines, degrees, folders, tags) for
+  the whole vault after every change: 44–56 ms with 20 000 notes and 60 000
+  lines. The data it builds from is patched now (see "The graph after a
+  change"), but the rules for folders, shared tags, the filter and notes
+  without lines reach across notes, so a patch of the model is a separate job.
 - The frontmatter queries (`notes_where`, `projects`) parse the frontmatter of
   every note. The obvious fix was measured and made things worse, so a
   different way has to be found.

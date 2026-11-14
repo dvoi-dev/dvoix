@@ -802,6 +802,50 @@ impl Index {
         Ok(data)
     }
 
+    /// The part of [`Index::graph`] that belongs to `paths`: those of them
+    /// that are notes, with their tags and their outgoing links. A path that
+    /// is missing from the answer is not a note (anymore). The graph view
+    /// patches its copy with this after a change instead of reading the
+    /// whole vault again, so the cost follows the change, not the vault.
+    pub fn graph_notes(&self, paths: &[String]) -> Result<GraphData> {
+        let mut data = GraphData::default();
+        let mut note = self
+            .conn
+            .prepare_cached("SELECT title FROM notes WHERE path = ?1")?;
+        let mut tags = self
+            .conn
+            .prepare_cached("SELECT tag FROM tags WHERE path = ?1 ORDER BY tag")?;
+        let mut links = self
+            .conn
+            .prepare_cached("SELECT target FROM links WHERE source = ?1 ORDER BY target")?;
+        let mut seen = HashSet::new();
+        for path in paths {
+            if !seen.insert(path.as_str()) {
+                continue;
+            }
+            let Some(title) = note
+                .query_row([path], |r| r.get::<_, String>(0))
+                .optional()?
+            else {
+                continue;
+            };
+            data.notes.push(GraphNote {
+                path: path.clone(),
+                title,
+                tags: tags
+                    .query_map([path], |r| r.get(0))?
+                    .collect::<std::result::Result<_, _>>()?,
+            });
+            for target in links.query_map([path], |r| r.get::<_, String>(0))? {
+                data.links.push(GraphLink {
+                    source: path.clone(),
+                    target: target?,
+                });
+            }
+        }
+        Ok(data)
+    }
+
     fn summaries(&self, sql: &str, arg: &str) -> Result<Vec<NoteSummary>> {
         let mut stmt = self.conn.prepare(sql)?;
         let notes = stmt
@@ -1265,6 +1309,55 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// The part of the graph of some notes is exactly what the whole graph
+    /// holds for them, and a path that is not a note is left out.
+    #[test]
+    fn graph_notes_matches_the_whole_graph() {
+        let (_dir, vault) = sample_vault();
+        vault
+            .write(
+                "beta.md",
+                "# Beta\nA #project, see [[Alpha]] and [[Gamma]].",
+            )
+            .unwrap();
+        let mut index = Index::for_vault(&vault).unwrap();
+        index.rebuild(&vault).unwrap();
+
+        let whole = index.graph().unwrap();
+        let part = index
+            .graph_notes(&[
+                "beta.md".into(),
+                "gone.md".into(),
+                "picture.canvas".into(),
+                "beta.md".into(),
+            ])
+            .unwrap();
+        assert_eq!(
+            part.notes,
+            whole
+                .notes
+                .iter()
+                .filter(|n| n.path == "beta.md")
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            part.links,
+            whole
+                .links
+                .iter()
+                .filter(|l| l.source == "beta.md")
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+
+        // After a removal the note is missing from the answer.
+        std::fs::remove_file(vault.root().join("beta.md")).unwrap();
+        index.remove("beta.md").unwrap();
+        let part = index.graph_notes(&["beta.md".into()]).unwrap();
+        assert!(part.notes.is_empty() && part.links.is_empty());
     }
 
     #[test]
