@@ -23,10 +23,10 @@
       "matchPackageNames": ["svelte", "svelte-check", "@sveltejs/**", "@tsconfig/svelte"]
     },
     {
-      "description": "Routine updates merge themselves once the CI is green; major updates stay a manual decision.",
+      "description": "Routine updates merge themselves once the CI is green; major updates stay a manual decision. Renovate merges itself (not GitHub auto-merge), because it waits for the checks even without branch protection.",
       "matchUpdateTypes": ["minor", "patch"],
       "automerge": true,
-      "platformAutomerge": true
+      "platformAutomerge": false
     }
   ],
   "lockFileMaintenance": {

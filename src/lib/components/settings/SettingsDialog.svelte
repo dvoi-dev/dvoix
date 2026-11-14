@@ -361,7 +361,9 @@
                 Install {updater.version} & restart
               </button>
             {:else if updater.status === "downloading"}
-              <span class="text-xs text-zinc-400 tabular-nums">Downloading … {Math.round(updater.progress * 100)}%</span>
+              <span class="text-xs text-zinc-400 tabular-nums"
+                >Downloading …{updater.progress === null ? "" : ` ${Math.round(updater.progress * 100)}%`}</span
+              >
             {:else}
               <button
                 class="rounded-md bg-zinc-800 px-2.5 py-1 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-700 disabled:opacity-50"

@@ -1,6 +1,7 @@
 // Sets the app version everywhere at once: package.json (and the lockfile),
-// the Cargo workspace and the Tauri config. After bumping, commit and push a
+// the Cargo workspace (and Cargo.lock) and the Tauri config. After bumping, commit and push a
 // `v<version>` tag; the release workflow builds the signed bundles from it.
+import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,5 +35,15 @@ if (updated === cargo) {
   process.exit(1);
 }
 writeFileSync(cargoPath, updated);
+
+// Cargo.lock records the version of the workspace crates too; without this the
+// bump commit is incomplete and the next build leaves a modified lockfile.
+// `--offline` only rewrites the workspace entries, no registry access needed.
+try {
+  execFileSync("cargo", ["update", "--workspace", "--offline"], { cwd: root, stdio: "inherit" });
+} catch {
+  console.error("Updating Cargo.lock failed. Run `cargo update --workspace` before committing.");
+  process.exit(1);
+}
 
 console.log(`dvoix is now ${version}. Commit, then: git tag v${version} && git push origin v${version}`);

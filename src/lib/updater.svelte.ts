@@ -6,6 +6,8 @@ import { getVersion } from "@tauri-apps/api/app";
 import { isTauri } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
+import { flushConfig } from "./config";
+import { vault } from "./vault.svelte";
 
 export type UpdaterStatus = "idle" | "checking" | "available" | "up-to-date" | "downloading" | "error";
 
@@ -13,12 +15,12 @@ class UpdaterStore {
   status = $state<UpdaterStatus>("idle");
   /** Version of the running app, from the Tauri config. */
   appVersion = $state("");
-  /** The new version, when one is available. */
+  /** The new version, when one is available (also after a failed install, for a retry). */
   version = $state<string | null>(null);
   /** Release notes of the new version. */
   notes = $state<string | null>(null);
-  /** Download progress, from 0 to 1. */
-  progress = $state(0);
+  /** Download progress from 0 to 1; null while the size is unknown. */
+  progress = $state<number | null>(0);
   error = $state<string | null>(null);
   /** The update banner was dismissed for this session. */
   dismissed = $state(false);
@@ -41,7 +43,7 @@ class UpdaterStore {
     if (!silent) this.status = "checking";
     try {
       const update = await check({ timeout: 15000 });
-      this.update = update;
+      this.replaceUpdate(update);
       if (update) {
         this.version = update.version;
         this.notes = update.body ?? null;
@@ -53,7 +55,9 @@ class UpdaterStore {
         this.status = silent ? "idle" : "up-to-date";
       }
     } catch (e) {
-      this.update = null;
+      this.replaceUpdate(null);
+      this.version = null;
+      this.notes = null;
       this.status = silent ? "idle" : "error";
       if (!silent) this.error = String(e);
     } finally {
@@ -61,28 +65,44 @@ class UpdaterStore {
     }
   }
 
-  /** Downloads the available update and restarts the app into it. */
+  /** Saves pending edits, downloads the available update and restarts the app into it. */
   async install() {
     const update = this.update;
     if (!update || this.status === "downloading") return;
     this.status = "downloading";
     this.progress = 0;
     this.error = null;
+    this.dismissed = false;
     let total = 0;
     let loaded = 0;
     try {
+      // The installer may end the process (on Windows it always does), and
+      // the restart does not wait for `beforeunload`: everything still
+      // waiting to be written must be on disk first.
+      await vault.flush();
+      await flushConfig();
+      if (vault.dirty) throw new Error("Your changes could not be saved, so the update was not installed.");
       await update.downloadAndInstall((event) => {
-        if (event.event === "Started") total = event.data.contentLength ?? 0;
-        else if (event.event === "Progress") {
+        if (event.event === "Started") {
+          total = event.data.contentLength ?? 0;
+          this.progress = total > 0 ? 0 : null;
+        } else if (event.event === "Progress") {
           loaded += event.data.chunkLength;
-          this.progress = total > 0 ? Math.min(1, loaded / total) : 0;
+          this.progress = total > 0 ? Math.min(1, loaded / total) : null;
         }
       });
       await relaunch();
     } catch (e) {
       this.status = "error";
-      this.error = String(e);
+      this.error = e instanceof Error ? e.message : String(e);
     }
+  }
+
+  /** Swaps the pending update and releases the native resource of the old one. */
+  private replaceUpdate(next: Update | null) {
+    const old = this.update;
+    this.update = next;
+    if (old && old !== next) void old.close().catch(() => {});
   }
 }
 

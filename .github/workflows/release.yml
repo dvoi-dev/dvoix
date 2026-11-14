@@ -118,6 +118,8 @@ jobs:
         with:
           releaseId: ${{ needs.draft.outputs.release_id }}
           releaseBody: "Download the bundle for your system below. Once this release is published, installed apps update themselves from it."
-          args: ${{ matrix.args }}
+          # The release overlay turns on the signed updater bundles; local
+          # `tauri build` stays possible without the private key.
+          args: --config src-tauri/tauri.release.conf.json ${{ matrix.args }}
           updaterJsonPreferNsis: true
           retryAttempts: 3
