@@ -173,6 +173,8 @@ export const api = {
   notesWhere: (key: string, value: string) => invoke<NoteSummary[]>("notes_where", { key, value }),
   backlinks: (path: string) => invoke<NoteSummary[]>("backlinks", { path }),
   graph: () => invoke<GraphData>("graph"),
+  /** The graph data of only these notes; a path missing from the answer is not a note (anymore). */
+  graphNotes: (paths: string[]) => invoke<GraphData>("graph_notes", { paths }),
   tasks: () => invoke<TaskItem[]>("tasks"),
   setTaskDone: (path: string, line: number, text: string, done: boolean) =>
     invoke<VaultEntry>("set_task_done", { path, line, text, done }),

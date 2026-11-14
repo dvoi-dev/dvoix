@@ -151,6 +151,23 @@ fn main() {
         elapsed,
     );
 
+    // What the graph view reads after a change instead of the whole graph:
+    // one saved note, and a burst of 100 (a sync, a checkout).
+    let one = vec!["folder0/note-0.md".to_string()];
+    let (elapsed, part) = time(|| index.graph_notes(&one).expect("the note is read"));
+    row(
+        &format!("graph of one note ({} links)", part.links.len()),
+        elapsed,
+    );
+    let hundred: Vec<String> = (0..100)
+        .map(|i| format!("folder{}/note-{i}.md", i % 100))
+        .collect();
+    let (elapsed, part) = time(|| index.graph_notes(&hundred).expect("the notes are read"));
+    row(
+        &format!("graph of 100 notes ({} links)", part.links.len()),
+        elapsed,
+    );
+
     // The removal of a folder with 100 notes in it.
     let (elapsed, ()) = time(|| index.remove("folder50").expect("the folder is removed"));
     row("remove a folder of 100 notes", elapsed);

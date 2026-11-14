@@ -13,7 +13,10 @@
     colorGroupNames,
     colorGroups,
     neighborhood,
+    patchGraphData,
+    sameShape,
     type EdgeKind,
+    type GraphModel,
     type GraphNode,
     type NodeKind,
   } from "./model";
@@ -31,6 +34,8 @@
   const DEFAULT_ALPHA_MIN = 0.001;
   const LABEL_LIMIT = 140;
   const TAU = Math.PI * 2;
+  /** Above this many changed notes one read of the whole vault is cheaper than a read per note. */
+  const PATCH_MAX = 400;
   const KIND_LABELS: Record<NodeKind, string> = {
     note: "Note",
     attachment: "Attachment",
@@ -43,7 +48,9 @@
   let container: HTMLDivElement;
   let graph: ForceGraph<SimNode, SimLink> | undefined;
   let version = $state(0);
-  let data = $state<GraphData>({ notes: [], links: [] });
+  // Raw: the data is only ever replaced, and a deep proxy over every note and
+  // link of a big vault would cost on every read of buildGraph.
+  let data = $state.raw<GraphData>({ notes: [], links: [] });
   let loadError = $state<string | null>(null);
   let importError = $state<string | null>(null);
   let loaded = $state(false);
@@ -64,6 +71,8 @@
   let simNodes = new Map<string, SimNode>();
   let labelOrder: SimNode[] = [];
   let positionCache = new Map<string, SimNode>();
+  /** What force-graph was handed last, so a change that keeps every node and line does not hand it again. */
+  let shown: GraphModel = { nodes: [], edges: [] };
   let engineRunning = false;
   let hoverFlushFrame: number | undefined;
   const labelWidths = new Map<string, number>();
@@ -625,24 +634,53 @@
 
   // Reload when files change on disk: once per burst of changes, and only
   // one load at a time (a load that was superseded waits for the next one).
+  // A burst of changed notes is read on its own and patched into the data;
+  // the whole vault is read only the first time, after an error, for a
+  // change that names a folder (it can hold any number of notes) or for a
+  // burst so big that one read of everything is cheaper.
   let loadingData = false;
   let dataAgain = false;
+  let readAll = true;
+  const pendingPaths = new Set<string>();
+
+  function noteChanges(paths: string[]) {
+    if (readAll) return;
+    if (!paths.length || paths.some((path) => !path.toLowerCase().endsWith(".md"))) {
+      readAll = true;
+      pendingPaths.clear();
+      return;
+    }
+    for (const path of paths) pendingPaths.add(path);
+    if (pendingPaths.size > PATCH_MAX) {
+      readAll = true;
+      pendingPaths.clear();
+    }
+  }
+
   function loadData() {
     if (disposed) return;
     if (loadingData) {
       dataAgain = true;
       return;
     }
+    const all = readAll;
+    const paths = [...pendingPaths];
+    readAll = false;
+    pendingPaths.clear();
+    if (!all && !paths.length) return;
     loadingData = true;
-    api
-      .graph()
+    (all ? api.graph() : api.graphNotes(paths))
       .then((result) => {
         if (disposed) return;
-        data = result;
+        data = all ? result : patchGraphData(data, paths, result);
         loadError = null;
       })
       .catch((cause) => {
-        if (!disposed) loadError = String(cause);
+        if (disposed) return;
+        loadError = String(cause);
+        // The patch was lost with the error: only a full read is right again.
+        readAll = true;
+        pendingPaths.clear();
       })
       .finally(() => {
         loadingData = false;
@@ -657,6 +695,7 @@
 
   $effect(() => {
     void vault.changes.notes.number;
+    noteChanges(vault.changes.notes.paths);
     clearTimeout(reloadTimer);
     reloadTimer = setTimeout(loadData, 250);
     return () => clearTimeout(reloadTimer);
@@ -671,12 +710,19 @@
       if (!modelIds.has(id)) positionCache.delete(id);
     }
     const next = new Map<string, SimNode>();
+    const added: SimNode[] = [];
     for (const node of visible.nodes) {
       const old = positionCache.get(node.id);
       const sim = old ? Object.assign(old, node) : { ...node };
+      if (!old) added.push(sim);
       next.set(node.id, sim);
       positionCache.set(node.id, sim);
     }
+    // The same nodes and the same lines: the change was only in the looks of
+    // a node (its title, its first tag), which the objects above now carry.
+    // Handing force-graph the data again would restart the layout from full
+    // heat, and every note save would shake the whole graph.
+    const unchanged = sameShape(visible, shown);
     simNodes = next;
     labelOrder = [...next.values()].sort((left, right) => right.degree - left.degree || left.label.localeCompare(right.label));
     adjacency = new Map([...next.keys()].map((id) => [id, new Set<string>()]));
@@ -690,6 +736,22 @@
       if (inspected && !next.has(inspected.id)) inspected = null;
       refreshNeighbours();
     });
+    if (unchanged) {
+      redraw();
+      return;
+    }
+    // A new node starts next to a neighbour that already has its place,
+    // instead of at the origin, so it does not fly across the graph.
+    for (const node of added) {
+      for (const id of adjacency.get(node.id) ?? []) {
+        const anchor = next.get(id);
+        if (anchor?.x === undefined || anchor.y === undefined) continue;
+        node.x = anchor.x + (Math.random() - 0.5) * 20;
+        node.y = anchor.y + (Math.random() - 0.5) * 20;
+        break;
+      }
+    }
+    shown = visible;
     graph.graphData({ nodes: [...next.values()], links: visible.edges.map((edge) => ({ ...edge })) });
     queueHoverFlush();
     if (!fitted && visible.nodes.length) {
