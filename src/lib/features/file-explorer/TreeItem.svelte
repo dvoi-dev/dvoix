@@ -46,11 +46,15 @@
 
   // An explicit focus request (arrow keys, click) focuses this row's element.
   $effect(() => {
-    if (treeFocus.request > 0 && treeFocus.path === entry.path && !renaming) rowEl?.focus();
+    if (treeFocus.pending !== entry.path || renaming || !rowEl) return;
+    rowEl.focus();
+    treeFocus.done(entry.path);
   });
 
   function click(e: MouseEvent) {
-    treeFocus.focus(entry.path);
+    // The click already focused the row; asking again would pull the focus
+    // back from the editor the opened note is about to focus.
+    treeFocus.path = entry.path;
     if (entry.isDir) ui.toggleFolder(entry.path);
     else void vault.openFile(entry.path, { newTab: e.ctrlKey || e.metaKey });
   }
