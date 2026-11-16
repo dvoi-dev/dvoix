@@ -22,7 +22,7 @@ describe("fuzzyMatch", () => {
 
   it("ignores case", () => {
     expect(fuzzyMatch("MEET", "meeting")).not.toBeNull();
-    expect(fuzzyMatch("möbel", "Möbel")).not.toBeNull();
+    expect(fuzzyMatch("élan", "Élan")).not.toBeNull();
   });
 
   it("matches consecutive letters as a run", () => {

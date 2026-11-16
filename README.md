@@ -2,8 +2,6 @@
 
 A desktop app for notes, project management, tracking, and whatever comes later. Like Obsidian, all data lives as ordinary files in a folder on your computer (the **vault**). The files are the only source of truth; everything else is a cache that can be rebuilt at any time.
 
-![dvoix](docs/screenshot.png)
-
 ## What already works
 
 - Pick a vault folder; the one you opened last is loaded again at startup

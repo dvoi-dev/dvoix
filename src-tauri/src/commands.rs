@@ -491,8 +491,8 @@ mod tests {
     #[test]
     fn decodes_uri_components() {
         assert_eq!(
-            percent_decode("9%20-%20System%2Fbild%C3%A4.png").unwrap(),
-            "9 - System/bildä.png"
+            percent_decode("9%20-%20System%2Fcaf%C3%A9.png").unwrap(),
+            "9 - System/café.png"
         );
         assert!(percent_decode("%zz").is_err());
         assert!(percent_decode("%4").is_err());

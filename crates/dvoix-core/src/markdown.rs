@@ -564,10 +564,10 @@ mod tests {
 
     #[test]
     fn renders_tables_tasks_and_strikethrough() {
-        let html = render_body("| a | b |\n| --- | --- |\n| 1 | 2 |\n\n- [x] fertig\n\n~~weg~~");
+        let html = render_body("| a | b |\n| --- | --- |\n| 1 | 2 |\n\n- [x] done\n\n~~gone~~");
         assert!(html.contains("<table>"));
         assert!(html.contains("type=\"checkbox\""));
-        assert!(html.contains("<del>weg</del>"));
+        assert!(html.contains("<del>gone</del>"));
     }
 
     #[test]

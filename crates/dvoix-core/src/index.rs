@@ -1366,9 +1366,9 @@ mod tests {
         let mut index = Index::for_vault(&vault).unwrap();
         index.rebuild(&vault).unwrap();
 
-        vault.write("beta.md", "# Beta\nJetzt #fertig").unwrap();
+        vault.write("beta.md", "# Beta\nNow #done").unwrap();
         index.update(&vault, "beta.md").unwrap();
-        assert_eq!(index.notes_with_tag("fertig").unwrap().len(), 1);
+        assert_eq!(index.notes_with_tag("done").unwrap().len(), 1);
 
         index.remove("projects").unwrap();
         assert!(index.backlinks("beta.md").unwrap().is_empty());
