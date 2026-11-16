@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/assets/dvoix-icon.svg" alt="dvoix logo" width="128" height="128"></p>
+
 # dvoix
 
 A desktop app for notes, project management, tracking, and whatever comes later. Like Obsidian, all data lives as ordinary files in a folder on your computer (the **vault**). The files are the only source of truth; everything else is a cache that can be rebuilt at any time.
