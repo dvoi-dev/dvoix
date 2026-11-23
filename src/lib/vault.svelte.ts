@@ -1,7 +1,15 @@
 // App state for the open vault and the open file, shared by all components.
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { untrack } from "svelte";
-import { api, onVaultChanged, type VaultChange, type VaultEntry, type VaultInfo } from "./api";
+import {
+  api,
+  onVaultChanged,
+  type NoteAliases,
+  type UpdatedLinkFile,
+  type VaultChange,
+  type VaultEntry,
+  type VaultInfo,
+} from "./api";
 import { appEvents } from "./events";
 import { creatableFileTypes, type FileType } from "./filetypes";
 import { flushConfig } from "./config";
@@ -171,6 +179,11 @@ class VaultStore {
     return path ? (this.buffers[path]?.content ?? "") : "";
   }
 
+  /** The in-memory text of a buffered note, or undefined when it is not open. */
+  bufferedContent(path: string): string | undefined {
+    return this.buffers[path]?.content;
+  }
+
   saveStateFor(path: string | null): SaveState {
     if (!path) return "saved";
     const buffer = this.buffers[path];
@@ -227,12 +240,53 @@ class VaultStore {
     return map;
   });
 
-  /** The files of the vault by their name, for the lookups of links. */
-  private fileByName = $derived.by(() => {
-    const map = new Map<string, VaultEntry>();
-    for (const entry of this.entries) if (!entry.isDir && !map.has(entry.name.toLowerCase())) map.set(entry.name.toLowerCase(), entry);
+  /** The files of the vault by their name, for the lookups of links. All
+   * candidates per name: an ambiguous `[[name]]` is answered by path proximity. */
+  private filesByName = $derived.by(() => {
+    const map = new Map<string, VaultEntry[]>();
+    for (const entry of this.entries) {
+      if (entry.isDir) continue;
+      const key = entry.name.toLowerCase();
+      const list = map.get(key);
+      if (list) list.push(entry);
+      else map.set(key, [entry]);
+    }
     return map;
   });
+
+  /** Frontmatter aliases per note, read from the index (a cache over the files). */
+  private aliasRows = $state<NoteAliases[]>([]);
+  /** Moves when the alias cache changes, so suggestion caches know they are stale. */
+  aliasesVersion = $state(0);
+  private aliasTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** The aliases of a note by its path (lower-cased), as written. */
+  private aliasesByPath = $derived.by(() => {
+    const map = new Map<string, string[]>();
+    for (const row of this.aliasRows) map.set(row.path.toLowerCase(), row.aliases);
+    return map;
+  });
+
+  /** The notes that own an alias (lower-cased), for `[[Alias]]` resolution. */
+  private entriesByAlias = $derived.by(() => {
+    const map = new Map<string, VaultEntry[]>();
+    for (const row of this.aliasRows) {
+      const entry = this.fileByPath.get(row.path.toLowerCase());
+      if (!entry) continue;
+      for (const alias of row.aliases) {
+        const key = alias.toLowerCase();
+        const list = map.get(key);
+        if (list) list.push(entry);
+        else map.set(key, [entry]);
+      }
+    }
+    return map;
+  });
+
+  /** The frontmatter aliases of a note, as written; empty when it has none. */
+  aliasesFor(path: string): string[] {
+    return this.aliasesByPath.get(path.toLowerCase()) ?? [];
+  }
 
   /** Called with the paths of every batch of changes, for store plugins (`dvoix.vault.onChange`). */
   private changeListeners = new Set<(paths: string[], changes: VaultChangeKind[]) => void>();
@@ -346,6 +400,9 @@ class VaultStore {
     settings.reset();
     this.info = null;
     this.entries = [];
+    this.aliasRows = [];
+    this.aliasesVersion++;
+    clearTimeout(this.aliasTimer);
     this.entriesVersion++;
     this.trashVersion++;
     this.tabs = [];
@@ -363,10 +420,34 @@ class VaultStore {
   }
 
   async refresh(changed: string[] = []) {
-    this.entries = await api.listEntries();
+    const [entries, aliasRows] = await Promise.all([api.listEntries(), api.aliases()]);
+    this.entries = entries;
+    this.aliasRows = aliasRows;
+    this.aliasesVersion++;
     this.entriesVersion++;
     // The list of the vault was replaced, so the tree of the vault changed.
     this.note(this.changes.structure, changed);
+  }
+
+  /**
+   * Reads the aliases again shortly after notes changed: their frontmatter
+   * (and with it their aliases) can change on every save, but the entry list
+   * does not, so this is lighter than a full refresh.
+   */
+  private scheduleAliasRefresh() {
+    clearTimeout(this.aliasTimer);
+    const navigation = this.navigationId;
+    this.aliasTimer = setTimeout(() => {
+      void api
+        .aliases()
+        .then((rows) => {
+          if (this.navigationId === navigation && this.info) {
+            this.aliasRows = rows;
+            this.aliasesVersion++;
+          }
+        })
+        .catch(() => undefined);
+    }, 150);
   }
 
   /**
@@ -467,7 +548,10 @@ class VaultStore {
     // see the new version.
     if (patched) this.entriesVersion++;
     this.note(this.changes.files, changes.map((c) => c.path));
-    if (notePaths.length) this.note(this.changes.notes, notePaths);
+    if (notePaths.length) {
+      this.note(this.changes.notes, notePaths);
+      this.scheduleAliasRefresh();
+    }
     if (listAgain) this.scheduleRefresh(lastAdded);
     const paths = [...new Set(changes.map((c) => c.path))];
     const kinds = changes.map((c) => ({ path: c.path, kind: c.kind }));
@@ -1051,13 +1135,37 @@ class VaultStore {
     await this.createFileAt(name, `# ${target.split("/").pop()}\n\n`, opts);
   }
 
-  resolveLink(target: string): string | undefined {
-    // The path of the file, then its name. The maps are built once per change
-    // of the list of the vault, so this is a lookup and not a walk.
+  resolveLink(target: string, fromPath: string | null = this.openPath): string | undefined {
+    // Exact path, path without `.md`, file name, then frontmatter alias. When
+    // several files share a name or alias, the one closest to `fromPath` wins
+    // (most shared parent folders, then path order). The maps are built once
+    // per change of the list, so this is a lookup and not a walk.
     const t = target.toLowerCase();
     const exact = this.fileByPath.get(t) ?? this.fileByPath.get(`${t}.md`);
     if (exact) return exact.path;
-    return (this.fileByName.get(t) ?? this.fileByName.get(`${t}.md`))?.path;
+    const byName = this.filesByName.get(t) ?? this.filesByName.get(`${t}.md`);
+    if (byName?.length) return this.closestTo(byName, fromPath).path;
+    const byAlias = this.entriesByAlias.get(t);
+    if (byAlias?.length) return this.closestTo(byAlias, fromPath).path;
+    return undefined;
+  }
+
+  /** The candidate with the most parent folders shared with `fromPath`; ties go to path order. */
+  private closestTo(candidates: VaultEntry[], fromPath: string | null): VaultEntry {
+    const from = (fromPath ?? "").toLowerCase().split("/");
+    let best = candidates[0];
+    let bestShared = -1;
+    for (const candidate of candidates) {
+      const parts = candidate.path.toLowerCase().split("/");
+      let shared = 0;
+      while (shared < from.length - 1 && shared < parts.length - 1 && from[shared] === parts[shared]) shared++;
+      const key = candidate.path.toLowerCase();
+      if (shared > bestShared || (shared === bestShared && key < best.path.toLowerCase())) {
+        best = candidate;
+        bestShared = shared;
+      }
+    }
+    return best;
   }
 
   /** The entry of a vault path, as a lookup instead of a walk over the list. */
@@ -1433,14 +1541,38 @@ class VaultStore {
   }
 
   private async undoMove(from: string, to: string) {
-    const ok = await this.moveTo(from, to, { undo: false });
-    if (!ok && this.error) toasts.error(this.error);
+    // The link-aware undo restores the notes the rename rewrote; a plain
+    // move back is the fallback for a rename that predates the snapshots.
+    const snapshots = this.renameSnapshots.get(to);
+    if (!snapshots) {
+      const ok = await this.moveTo(from, to, { undo: false });
+      if (!ok && this.error) toasts.error(this.error);
+      return;
+    }
+    try {
+      this.renameSnapshots.delete(to);
+      const result = await api.undoRenameWithLinks(from, to, snapshots);
+      // The backend moved the entry back already; take the new paths into
+      // the tree, the tabs and the buffers without moving anything again.
+      this.applyMovedEntry(to, from, result.entry);
+      await this.refresh();
+      if (result.skipped.length) {
+        toasts.error(
+          `${result.skipped.length} note(s) changed since the rename and kept their text.`,
+        );
+      }
+    } catch (e) {
+      toasts.error(String(e));
+    }
   }
+
+  /** The notes `renameWithLinks` rewrote, by their new path, for the undo. */
+  private renameSnapshots = new Map<string, UpdatedLinkFile[]>();
 
   private async moveTo(
     from: string,
     to: string,
-    opts: { undo?: boolean; verb?: "move" | "rename" } = {},
+    opts: { undo?: boolean; verb?: "move" | "rename"; snapshots?: boolean } = {},
   ): Promise<boolean> {
     if (to === from) return true;
     try {
@@ -1450,39 +1582,18 @@ class VaultStore {
         this.error = "Some files could not be saved. Retry saving before moving them.";
         return false;
       }
-      const entry = await api.renameEntry(from, to);
-      const remap = (p: string) => (p === from ? to : p.startsWith(`${from}/`) ? to + p.slice(from.length) : p);
-      // The entries move with the file right away: the tree, the link lookups
-      // and the next name generation see the new paths without the watcher.
-      const movedEntries = this.entries.filter((e) => e.path === from || e.path.startsWith(`${from}/`));
-      const movedPaths = movedEntries.map((e) => e.path);
-      // The entry of the moved path comes back from the command with its real
-      // size and time; everything inside a moved folder keeps its metadata,
-      // only its path changes.
-      this.entries = this.entries.map((e) => {
-        if (e.path === from) return { ...entry, path: to, name: to.split("/").pop()! };
-        if (!e.path.startsWith(`${from}/`)) return e;
-        const path = remap(e.path);
-        return { ...e, path, name: path.split("/").pop()! };
-      });
-      // The moved file was written by us: its watcher echo must not read it
-      // back over the editor.
-      this.noteSelfWrite({ ...entry, path: to });
-      ui.moved(from, to);
-      for (const t of this.tabs) if (t.path) t.path = remap(t.path);
-      const movedBuffers: Record<string, FileBuffer> = {};
-      for (const [path, buffer] of Object.entries(this.buffers)) movedBuffers[remap(path)] = buffer;
-      this.buffers = movedBuffers;
-      for (const [path, buffer] of Object.entries(this.buffers)) if (buffer.dirty) this.scheduleSave(path);
-      this.recent = this.recent.map(remap);
-      this.navHistory = this.navHistory.map((h) => (h.path ? { ...h, path: remap(h.path) } : h));
-      this.saveTabs();
-      if (to.includes("/")) ui.reveal(to);
-      this.appliedOwnChange(
-        [...movedPaths, ...movedPaths.map(remap)],
-        movedEntries.some((e) => e.isDir || isNote(e.path)),
-      );
-      appEvents.emit("file-rename", { from, to, isDir: entry.isDir });
+      const result = await api.renameWithLinks(from, to);
+      const entry = result.entry;
+      if (opts.snapshots !== false && result.updatedFiles.length) {
+        this.renameSnapshots.set(to, result.updatedFiles);
+      }
+      // The backend rewrote other notes on disk. An open, clean buffer of one
+      // of them still holds the old text and would write it back on the next
+      // save, so it is read again; a dirty one cannot be here (checked above).
+      for (const updated of result.updatedFiles) {
+        if (this.buffers[updated.entry.path]) void this.reloadBuffer(updated.entry.path);
+      }
+      this.applyMovedEntry(from, to, entry);
       if (opts.undo !== false) {
         const oldName = from.split("/").pop() ?? from;
         const newName = to.split("/").pop() ?? to;
@@ -1491,13 +1602,52 @@ class VaultStore {
           opts.verb === "rename"
             ? `Renamed "${oldName}" to "${newName}"`
             : `Moved "${oldName}" to ${destFolder ? `"${destFolder}"` : "vault root"}`;
-        toasts.undo(message, () => this.undoMove(to, from));
+        toasts.undo(message, () => this.undoMove(from, to));
       }
       return true;
     } catch (e) {
       this.error = String(e);
       return false;
     }
+  }
+
+  /**
+   * Takes a rename the backend already performed into the client state:
+   * entries, buffers, tabs, history, the tree and the own-change bookkeeping.
+   */
+  private applyMovedEntry(from: string, to: string, entry: VaultEntry) {
+    const remap = (p: string) => (p === from ? to : p.startsWith(`${from}/`) ? to + p.slice(from.length) : p);
+    // The entries move with the file right away: the tree, the link lookups
+    // and the next name generation see the new paths without the watcher.
+    const movedEntries = this.entries.filter((e) => e.path === from || e.path.startsWith(`${from}/`));
+    const movedPaths = movedEntries.map((e) => e.path);
+    // The entry of the moved path comes back from the command with its real
+    // size and time; everything inside a moved folder keeps its metadata,
+    // only its path changes.
+    this.entries = this.entries.map((e) => {
+      if (e.path === from) return { ...entry, path: to, name: to.split("/").pop()! };
+      if (!e.path.startsWith(`${from}/`)) return e;
+      const path = remap(e.path);
+      return { ...e, path, name: path.split("/").pop()! };
+    });
+    // The moved file was written by us: its watcher echo must not read it
+    // back over the editor.
+    this.noteSelfWrite({ ...entry, path: to });
+    ui.moved(from, to);
+    for (const t of this.tabs) if (t.path) t.path = remap(t.path);
+    const movedBuffers: Record<string, FileBuffer> = {};
+    for (const [path, buffer] of Object.entries(this.buffers)) movedBuffers[remap(path)] = buffer;
+    this.buffers = movedBuffers;
+    for (const [path, buffer] of Object.entries(this.buffers)) if (buffer.dirty) this.scheduleSave(path);
+    this.recent = this.recent.map(remap);
+    this.navHistory = this.navHistory.map((h) => (h.path ? { ...h, path: remap(h.path) } : h));
+    this.saveTabs();
+    if (to.includes("/")) ui.reveal(to);
+    this.appliedOwnChange(
+      [...movedPaths, ...movedPaths.map(remap)],
+      movedEntries.some((e) => e.isDir || isNote(e.path)),
+    );
+    appEvents.emit("file-rename", { from, to, isDir: entry.isDir });
   }
 
   async trash(path: string, opts: { undo?: boolean } = {}) {

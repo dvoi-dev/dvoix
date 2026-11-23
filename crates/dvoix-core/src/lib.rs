@@ -8,6 +8,7 @@
 
 pub mod error;
 pub mod index;
+pub mod link_rewrite;
 pub mod markdown;
 pub mod process;
 pub mod store;
@@ -16,7 +17,7 @@ pub mod vault;
 pub mod watcher;
 
 pub use error::{Error, Result};
-pub use index::{GraphData, Index, NoteSummary, SearchHit, TagCount, TaskItem};
+pub use index::{GraphData, Index, NoteAliases, NoteSummary, SearchHit, TagCount, TaskItem};
 pub use markdown::{ParsedNote, RenderedNote};
 pub use tasks::{Priority, Task};
 pub use vault::{FileRead, HiddenFilter, TrashedEntry, Vault, VaultEntry};

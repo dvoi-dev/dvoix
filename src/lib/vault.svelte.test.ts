@@ -2,20 +2,27 @@
 // file operations. The Rust commands are mocked, so no Tauri window is needed.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { VaultChange, VaultEntry } from "./api";
+import { toasts } from "./toast.svelte";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+vi.mock("./toast.svelte", () => ({
+  toasts: { undo: vi.fn(), error: vi.fn() },
+}));
 vi.mock("./api", () => ({
   api: {
     lastVault: vi.fn(async () => null),
     openVault: vi.fn(),
     closeVault: vi.fn(),
     listEntries: vi.fn(async () => []),
+    aliases: vi.fn(async () => []),
     readFile: vi.fn(async () => ""),
     readFileMeta: vi.fn(),
     writeFile: vi.fn(),
     createFile: vi.fn(),
     createFolder: vi.fn(),
     renameEntry: vi.fn(),
+    renameWithLinks: vi.fn(),
+    undoRenameWithLinks: vi.fn(),
     trashEntry: vi.fn(),
     readConfig: vi.fn(async () => null),
     writeConfig: vi.fn(async () => {}),
@@ -49,6 +56,11 @@ function entry(path: string, isDir = false): VaultEntry {
   return { path, name, extension: isDir || !name.includes(".") ? "" : name.split(".").pop()!, isDir, size: 10, modified: 1000 };
 }
 
+/** Puts alias rows into the store, the way `refresh` reads them from the index. */
+function setAliases(rows: { path: string; aliases: string[] }[]) {
+  (vault as unknown as { aliasRows: { path: string; aliases: string[] }[] }).aliasRows = rows;
+}
+
 /** The private bookkeeping of the store, reset between tests. */
 interface Privates {
   navHistory: unknown[];
@@ -70,6 +82,7 @@ function reset() {
   priv.selfWrites = [];
   vault.info = null;
   vault.entries = [];
+  (vault as unknown as { aliasRows: unknown[] }).aliasRows = [];
   vault.tabs = [];
   vault.activeTabId = 0;
   vault.split = null;
@@ -84,12 +97,16 @@ beforeEach(() => {
   reset();
   vi.useFakeTimers();
   vi.mocked(api.listEntries).mockImplementation(async () => [...vault.entries]);
+  vi.mocked(api.aliases).mockImplementation(async () => (vault as unknown as { aliasRows: { path: string; aliases: string[] }[] }).aliasRows);
   vi.mocked(api.readFile).mockImplementation(async (path) => `content of ${path}`);
   vi.mocked(api.readFileMeta).mockImplementation(async (path) => ({ content: `content of ${path}`, entry: entry(path) }));
   vi.mocked(api.writeFile).mockImplementation(async (path) => entry(path));
   vi.mocked(api.createFile).mockImplementation(async (path) => entry(path));
   vi.mocked(api.createFolder).mockImplementation(async (path) => entry(path, true));
-  vi.mocked(api.renameEntry).mockImplementation(async (_from, to) => entry(to));
+  vi.mocked(api.renameWithLinks).mockImplementation(async (_from, to) => ({
+    entry: entry(to),
+    updatedFiles: [],
+  }));
   vi.mocked(api.trashEntry).mockImplementation(async (path) => ({ name: path, originalPath: path }) as never);
 });
 
@@ -418,6 +435,36 @@ describe("links", () => {
     expect(api.createFile).toHaveBeenCalledWith("Fresh Note.md", "# Fresh Note\n\n");
     expect(vault.openPath).toBe("Fresh Note.md");
   });
+
+  it("resolves frontmatter aliases, case-insensitive", () => {
+    vault.entries = [entry("Projects/Meeting-Planning.md")];
+    setAliases([{ path: "Projects/Meeting-Planning.md", aliases: ["Weekly Sync", "Café"] }]);
+    expect(vault.resolveLink("weekly sync")).toBe("Projects/Meeting-Planning.md");
+    expect(vault.resolveLink("CAFÉ")).toBe("Projects/Meeting-Planning.md");
+    expect(vault.aliasesFor("projects/meeting-planning.md")).toEqual(["Weekly Sync", "Café"]);
+    expect(vault.aliasesFor("other.md")).toEqual([]);
+  });
+
+  it("prefers an exact path and a file name over an alias", () => {
+    vault.entries = [entry("Alpha.md"), entry("Beta.md")];
+    setAliases([{ path: "Beta.md", aliases: ["Alpha"] }]);
+    expect(vault.resolveLink("Alpha")).toBe("Alpha.md");
+    setAliases([{ path: "Beta.md", aliases: ["alpha.md"] }]);
+    expect(vault.resolveLink("alpha.md")).toBe("Alpha.md");
+  });
+
+  it("answers an ambiguous name or alias by path proximity, then path order", () => {
+    vault.entries = [entry("a/Note.md"), entry("b/Note.md"), entry("b/Here.md")];
+    expect(vault.resolveLink("Note", "b/Here.md")).toBe("b/Note.md");
+    expect(vault.resolveLink("Note", "a/Here.md")).toBe("a/Note.md");
+    expect(vault.resolveLink("Note", null)).toBe("a/Note.md");
+    setAliases([
+      { path: "a/Note.md", aliases: ["Shared"] },
+      { path: "b/Note.md", aliases: ["Shared"] },
+    ]);
+    expect(vault.resolveLink("Shared", "b/Here.md")).toBe("b/Note.md");
+    expect(vault.resolveLink("Shared", null)).toBe("a/Note.md");
+  });
 });
 
 describe("file operations", () => {
@@ -434,7 +481,7 @@ describe("file operations", () => {
     await vault.newTab();
     await vault.openFile("a.md");
     await vault.rename("a.md", "b.md");
-    expect(api.renameEntry).toHaveBeenCalledWith("a.md", "b.md");
+    expect(api.renameWithLinks).toHaveBeenCalledWith("a.md", "b.md");
     expect(vault.openPath).toBe("b.md");
     expect(vault.tabs[0].path).toBe("b.md");
     expect(vault.recent[0]).toBe("b.md");
@@ -446,7 +493,7 @@ describe("file operations", () => {
     await vault.newTab();
     await vault.openFile("a/b.md");
     await vault.move("a", "target");
-    expect(api.renameEntry).toHaveBeenCalledWith("a", "target/a");
+    expect(api.renameWithLinks).toHaveBeenCalledWith("a", "target/a");
     expect(vault.openPath).toBe("target/a/b.md");
     // The list keeps its order until the next refresh sorts it again.
     expect(vault.entries.map((e) => e.path)).toEqual(["target/a", "target/a/b.md", "target"]);
@@ -456,7 +503,40 @@ describe("file operations", () => {
     vault.entries = [entry("a", true), entry("a/b.md")];
     await vault.move("a", "a");
     await vault.move("a", "a/sub");
-    expect(api.renameEntry).not.toHaveBeenCalled();
+    expect(api.renameWithLinks).not.toHaveBeenCalled();
+  });
+
+  it("keeps the rewritten notes of a rename for the undo", async () => {
+    vault.entries = [entry("a.md"), entry("b.md")];
+    vi.mocked(api.renameWithLinks).mockImplementationOnce(async (_from, to) => ({
+      entry: entry(to),
+      updatedFiles: [{ entry: entry("b.md"), previousContent: "See [[a]]." }],
+    }));
+    await vault.rename("a.md", "z.md");
+    const priv = vault as unknown as { renameSnapshots: Map<string, unknown[]> };
+    expect(priv.renameSnapshots.get("z.md")).toHaveLength(1);
+  });
+
+  it("undo restores the rewritten notes through the backend", async () => {
+    vault.entries = [entry("a.md"), entry("b.md")];
+    vi.mocked(api.renameWithLinks).mockImplementationOnce(async (_from, to) => ({
+      entry: entry(to),
+      updatedFiles: [{ entry: entry("b.md"), previousContent: "See [[a]]." }],
+    }));
+    vi.mocked(api.undoRenameWithLinks).mockImplementationOnce(async (from, to) => ({
+      entry: entry(to),
+      restored: ["b.md"],
+      skipped: [],
+    }));
+    await vault.rename("a.md", "z.md");
+    // The toast carries the undo; run what the user would click.
+    
+    const undo = vi.mocked(toasts.undo).mock.calls.at(-1)?.[1];
+    await undo?.();
+    expect(api.undoRenameWithLinks).toHaveBeenCalledWith("a.md", "z.md", [
+      { entry: entry("b.md"), previousContent: "See [[a]]." },
+    ]);
+    expect(vault.entries.map((e) => e.path)).toContain("a.md");
   });
 
   it("trash removes entries and closes the tabs of what is gone", async () => {

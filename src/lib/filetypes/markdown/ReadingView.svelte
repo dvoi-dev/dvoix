@@ -8,7 +8,8 @@
   import { applyChange, parseFrontmatter } from "./frontmatter";
   import { highlightCodeBlocks } from "./codeHighlight";
   import { enhanceReading } from "./enhanceReading";
-  import { embedImage, isImage, parseEmbed } from "../../attachments";
+  import { embedContext, hydrateEmbeds, linkTarget } from "../../embeds";
+  import { vault } from "../../vault.svelte";
   import { reveal } from "../../reveal.svelte";
 
   let { path, content, onchange, onopen }: FileViewProps = $props();
@@ -30,14 +31,33 @@
     }
   });
 
-  // `![[photo.png]]` comes from the core as a link with `data-embed`; images
-  // are shown in its place, other files stay links.
+  // `![[photo.png]]` and `![[Note]]` come from the core as links with
+  // `data-embed`; images, notes and sections are shown in their place. The
+  // paths of the embedded notes are remembered, so a change to one of them
+  // re-renders only that embed.
+  let embeddedPaths = new Set<string>();
   $effect(() => {
     if (!prose || !rendered) return;
-    for (const link of prose.querySelectorAll<HTMLElement>("a[data-embed]")) {
-      const { target, width } = parseEmbed(link.dataset.embed ?? "");
-      if (isImage(target)) link.replaceWith(embedImage(target, width ?? (Number(link.textContent) || undefined)));
-    }
+    const controller = new AbortController();
+    void hydrateEmbeds(prose, path, { signal: controller.signal }).then((paths) => {
+      if (!controller.signal.aborted) embeddedPaths = paths;
+    });
+    return () => controller.abort();
+  });
+
+  // An embedded note changed on disk (or was edited in another tab): its
+  // embed is rendered again, the rest of the view stays as it is.
+  $effect(() => {
+    const changed = vault.changes.notes;
+    void changed.number;
+    if (!prose || !rendered || !embeddedPaths.size) return;
+    const hits = new Set(changed.paths.filter((p) => embeddedPaths.has(p)));
+    if (!hits.size) return;
+    const controller = new AbortController();
+    void hydrateEmbeds(prose, path, { signal: controller.signal, changed: hits }).then((paths) => {
+      if (!controller.signal.aborted) embeddedPaths = paths;
+    });
+    return () => controller.abort();
   });
 
   $effect(() => {
@@ -69,14 +89,16 @@
 
   /**
    * Wikilinks and links to other notes open in the app, everything else stays.
+   * Inside an embed, links resolve from the embedded note.
    */
   function handleClick(event: MouseEvent) {
     const link = (event.target as HTMLElement).closest("a");
     if (!link) return;
+    const context = embedContext(link, path);
     const wikilink = link.getAttribute("data-wikilink");
     if (wikilink) {
       event.preventDefault();
-      onopen(wikilink);
+      onopen(vault.resolveLink(wikilink, context) ?? wikilink);
       return;
     }
     const href = link.getAttribute("href");
@@ -84,7 +106,7 @@
     // Links to the web stay in the webview.
     if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith("//")) return;
     event.preventDefault();
-    onopen(href.split("#")[0]);
+    onopen(linkTarget(href, context));
   }
 
   // The outline asked for a heading: scroll to the one with that position or text.

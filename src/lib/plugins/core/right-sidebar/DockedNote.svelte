@@ -3,7 +3,7 @@
   // comes from the editor, every other note from the file on disk.
   import { onMount } from "svelte";
   import { api, type RenderedNote } from "../../../api";
-  import { embedImage, isImage, parseEmbed } from "../../../attachments";
+  import { embedContext, hydrateEmbeds, linkTarget } from "../../../embeds";
   import { highlightCodeBlocks } from "../../../filetypes/markdown/codeHighlight";
   import { enhanceReading } from "../../../filetypes/markdown/enhanceReading";
   import { parseFrontmatter } from "../../../filetypes/markdown/frontmatter";
@@ -39,14 +39,32 @@
     }
   });
 
-  // `![[photo.png]]` comes from the core as a link with `data-embed`; images
-  // are shown in its place, other files stay links.
+  // `![[photo.png]]` and `![[Note]]` come from the core as links with
+  // `data-embed`; images, notes and sections are shown in their place. The
+  // paths of the embedded notes are remembered, so a change to one of them
+  // re-renders only that embed.
+  let embeddedPaths = new Set<string>();
   $effect(() => {
     if (!prose || !rendered) return;
-    for (const link of prose.querySelectorAll<HTMLElement>("a[data-embed]")) {
-      const { target, width } = parseEmbed(link.dataset.embed ?? "");
-      if (isImage(target)) link.replaceWith(embedImage(target, width ?? (Number(link.textContent) || undefined)));
-    }
+    const controller = new AbortController();
+    void hydrateEmbeds(prose, path, { signal: controller.signal }).then((paths) => {
+      if (!controller.signal.aborted) embeddedPaths = paths;
+    });
+    return () => controller.abort();
+  });
+
+  // An embedded note changed: its embed is rendered again in place.
+  $effect(() => {
+    const changed = vault.changes.notes;
+    void changed.number;
+    if (!prose || !rendered || !embeddedPaths.size) return;
+    const hits = new Set(changed.paths.filter((p) => embeddedPaths.has(p)));
+    if (!hits.size) return;
+    const controller = new AbortController();
+    void hydrateEmbeds(prose, path, { signal: controller.signal, changed: hits }).then((paths) => {
+      if (!controller.signal.aborted) embeddedPaths = paths;
+    });
+    return () => controller.abort();
   });
 
   $effect(() => {
@@ -137,14 +155,16 @@
     return fm ? text.slice(fm.to + fm.eol.length) : text;
   }
 
-  /** Wikilinks and links to other notes open in the main area, everything else stays. */
+  /** Wikilinks and links to other notes open in the main area, everything else
+   * stays. Inside an embed, links resolve from the embedded note. */
   function handleClick(event: MouseEvent) {
     const link = (event.target as HTMLElement).closest("a");
     if (!link) return;
+    const context = embedContext(link, path);
     const wikilink = link.getAttribute("data-wikilink");
     if (wikilink) {
       event.preventDefault();
-      void vault.openLink(wikilink);
+      void vault.openLink(vault.resolveLink(wikilink, context) ?? wikilink);
       return;
     }
     const href = link.getAttribute("href");
@@ -152,7 +172,7 @@
     // Links to the web stay in the webview.
     if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith("//")) return;
     event.preventDefault();
-    void vault.openLink(href.split("#")[0]);
+    void vault.openLink(linkTarget(href, context));
   }
 </script>
 

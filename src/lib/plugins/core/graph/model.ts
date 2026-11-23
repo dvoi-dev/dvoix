@@ -146,7 +146,7 @@ interface Item {
 
 export function buildGraph(data: GraphData, entries: VaultEntry[], s: ModelSettings, vaultName: string): GraphModel {
   const matches = filterFn(s.filter);
-  const resolve = resolver(entries);
+  const resolve = resolver(entries, data.notes);
   const noteSet = new Set(data.notes.map((n) => n.path));
 
   const nodes = new Map<string, GraphNode>();
@@ -183,7 +183,7 @@ export function buildGraph(data: GraphData, entries: VaultEntry[], s: ModelSetti
   if (s.links) {
     for (const link of data.links) {
       if (!nodes.has(link.source)) continue;
-      const path = resolve(link.target);
+      const path = resolve(link.target, link.source);
       let target: string | undefined;
       if (path && noteSet.has(path)) target = nodes.has(path) ? path : undefined;
       else if (path) target = attachment(path);
@@ -276,21 +276,50 @@ function folderGroup(node: GraphNode): string | null {
 
 /**
  * Resolves link text the way `vault.resolveLink` does (exact path, path
- * without `.md`, then file name), but with lookup tables, because the graph
- * resolves every link of the vault at once.
+ * without `.md`, file name, then frontmatter alias, ambiguous ones by path
+ * proximity), but with lookup tables, because the graph resolves every link
+ * of the vault at once.
  */
-function resolver(entries: VaultEntry[]): (target: string) => string | undefined {
+function resolver(entries: VaultEntry[], notes: GraphData["notes"]): (target: string, fromPath?: string) => string | undefined {
   const byPath = new Map<string, string>();
-  const byName = new Map<string, string>();
+  const byName = new Map<string, string[]>();
+  const add = (map: Map<string, string[]>, key: string, path: string) => {
+    const list = map.get(key);
+    if (list) list.push(path);
+    else map.set(key, [path]);
+  };
   for (const e of entries) {
     if (e.isDir) continue;
     byPath.set(e.path.toLowerCase(), e.path);
-    const name = e.name.toLowerCase();
-    if (!byName.has(name)) byName.set(name, e.path);
+    add(byName, e.name.toLowerCase(), e.path);
   }
-  return (target) => {
+  // Frontmatter aliases resolve like file names; the note that owns the
+  // alias is a real node, not an "unresolved" one.
+  const byAlias = new Map<string, string[]>();
+  for (const n of notes) for (const alias of n.aliases) add(byAlias, alias.toLowerCase(), n.path);
+  const closest = (paths: string[], fromPath?: string): string => {
+    const from = (fromPath ?? "").toLowerCase().split("/");
+    let best = paths[0];
+    let bestShared = -1;
+    for (const path of paths) {
+      const parts = path.toLowerCase().split("/");
+      let shared = 0;
+      while (shared < from.length - 1 && shared < parts.length - 1 && from[shared] === parts[shared]) shared++;
+      if (shared > bestShared || (shared === bestShared && path.toLowerCase() < best.toLowerCase())) {
+        best = path;
+        bestShared = shared;
+      }
+    }
+    return best;
+  };
+  return (target, fromPath) => {
     const t = target.toLowerCase();
-    return byPath.get(t) ?? byPath.get(`${t}.md`) ?? byName.get(t) ?? byName.get(`${t}.md`);
+    const exact = byPath.get(t) ?? byPath.get(`${t}.md`);
+    if (exact) return exact;
+    const byNameHit = byName.get(t) ?? byName.get(`${t}.md`);
+    if (byNameHit) return closest(byNameHit, fromPath);
+    const byAliasHit = byAlias.get(t);
+    return byAliasHit ? closest(byAliasHit, fromPath) : undefined;
   };
 }
 
