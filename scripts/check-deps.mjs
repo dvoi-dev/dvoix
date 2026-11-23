@@ -1,4 +1,5 @@
-// Checks that every dependency in package.json is installed and resolvable.
+// Checks that Node.js and every dependency in package.json match what the
+// project needs, before any npm script runs.
 //
 // Without this, a stale node_modules (e.g. after pulling a branch that adds a
 // package) only shows up later as a cryptic "Failed to resolve import ..." from
@@ -9,6 +10,17 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+
+// An old Node fails later with cryptic Vite/Rolldown errors, so stop here with
+// an actionable message instead (issue #64).
+const requiredNode = pkg.engines?.node;
+if (requiredNode && !satisfies(process.versions.node, requiredNode)) {
+  console.error(
+    `Node.js ${process.versions.node} is too old; package.json requires ${requiredNode} (see .nvmrc).`,
+  );
+  console.error('Switch to the required Node version (e.g. "nvm use") and repeat the command.');
+  process.exit(1);
+}
 
 /** The file a bundler would load for a package: `exports.default`, `module` or `main`. */
 function entryFile(manifest) {
@@ -23,12 +35,13 @@ function entryFile(manifest) {
 
 /**
  * Checks an installed version against a range npm wrote for us
- * ("^1.2.3", "~1.2.3", "1.2.3", "*"). Everything else is left to npm.
+ * ("^1.2.3", "~1.2.3", "1.2.3", "*") or a minimum like the ">=26" in
+ * engines.node. Everything else is left to npm.
  */
 function satisfies(version, range) {
   if (!version || range === "*" || range === "latest") return true;
   const found = version.match(/^(\d+)\.(\d+)\.(\d+)/);
-  const wanted = range.match(/^(\^|~)?(\d+)(?:\.(\d+))?(?:\.(\d+))?$/);
+  const wanted = range.match(/^(>=|\^|~)?(\d+)(?:\.(\d+))?(?:\.(\d+))?$/);
   if (!found || !wanted) return true;
 
   const v = [Number(found[1]), Number(found[2]), Number(found[3])];
@@ -38,6 +51,9 @@ function satisfies(version, range) {
   const patch = Number(wanted[4] ?? 0);
 
   if (op === "") return v[0] === major && v[1] === minor && v[2] === patch;
+  if (op === ">=") {
+    return v[0] > major || (v[0] === major && (v[1] > minor || (v[1] === minor && v[2] >= patch)));
+  }
   if (op === "~") return v[0] === major && v[1] === minor && v[2] >= patch;
   // "^": compatible with the range, so the major stays the same (0.x is special).
   if (major > 0) return v[0] === major && (v[1] > minor || (v[1] === minor && v[2] >= patch));
