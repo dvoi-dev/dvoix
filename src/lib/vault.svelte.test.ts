@@ -1,7 +1,7 @@
 // Tests for the vault state: tabs, deferred saving, link resolution and the
 // file operations. The Rust commands are mocked, so no Tauri window is needed.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { VaultEntry } from "./api";
+import type { VaultChange, VaultEntry } from "./api";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./api", () => ({
@@ -11,6 +11,7 @@ vi.mock("./api", () => ({
     closeVault: vi.fn(),
     listEntries: vi.fn(async () => []),
     readFile: vi.fn(async () => ""),
+    readFileMeta: vi.fn(),
     writeFile: vi.fn(),
     createFile: vi.fn(),
     createFolder: vi.fn(),
@@ -84,6 +85,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.mocked(api.listEntries).mockImplementation(async () => [...vault.entries]);
   vi.mocked(api.readFile).mockImplementation(async (path) => `content of ${path}`);
+  vi.mocked(api.readFileMeta).mockImplementation(async (path) => ({ content: `content of ${path}`, entry: entry(path) }));
   vi.mocked(api.writeFile).mockImplementation(async (path) => entry(path));
   vi.mocked(api.createFile).mockImplementation(async (path) => entry(path));
   vi.mocked(api.createFolder).mockImplementation(async (path) => entry(path, true));
@@ -166,7 +168,7 @@ describe("saving", () => {
     expect(api.writeFile).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(400);
     expect(api.writeFile).toHaveBeenCalledTimes(1);
-    expect(api.writeFile).toHaveBeenCalledWith("a.md", "two");
+    expect(api.writeFile).toHaveBeenCalledWith("a.md", "two", { modified: 1000, size: 10 });
     expect(vault.dirty).toBe(false);
   });
 
@@ -195,6 +197,209 @@ describe("saving", () => {
     await vi.advanceTimersByTimeAsync(400);
     expect(vault.dirty).toBe(true);
     expect(vault.error).toContain("Saving failed");
+  });
+
+  it("chains saves: each write expects the disk state of the previous one", async () => {
+    vi.mocked(api.writeFile).mockImplementation(async (path) => ({ ...entry(path), size: 42, modified: 2000 }));
+    await vault.newTab();
+    await vault.openFile("a.md");
+    vault.update("one");
+    await vault.flush();
+    expect(api.writeFile).toHaveBeenLastCalledWith("a.md", "one", { modified: 1000, size: 10 });
+    vault.update("two");
+    await vault.flush();
+    expect(api.writeFile).toHaveBeenLastCalledWith("a.md", "two", { modified: 2000, size: 42 });
+  });
+});
+
+describe("external change conflicts", () => {
+  /** Delivers a watcher batch to the store, like `onVaultChanged` would. */
+  function emit(changes: VaultChange[]) {
+    (vault as unknown as { onVaultEvent(changes: VaultChange[]): void }).onVaultEvent(changes);
+  }
+
+  function change(kind: VaultChange["kind"], path: string, e?: VaultEntry): VaultChange {
+    return { kind, path, hidden: false, entry: e };
+  }
+
+  /** Opens a.md with unsaved edits and an external modification on disk. */
+  async function conflicted(diskContent = "their version", diskEntry = { ...entry("a.md"), size: 13, modified: 2000 }) {
+    vault.entries = [entry("a.md")];
+    await vault.newTab();
+    await vault.openFile("a.md");
+    vault.update("my edits");
+    vi.mocked(api.readFileMeta).mockImplementation(async () => ({ content: diskContent, entry: diskEntry }));
+    emit([change("modified", "a.md", diskEntry)]);
+    await vi.advanceTimersByTimeAsync(0);
+    return diskEntry;
+  }
+
+  it("an external edit on a dirty buffer stops autosave and raises a conflict", async () => {
+    await conflicted();
+    expect(vault.conflictFor("a.md")).toEqual({
+      kind: "modified",
+      diskContent: "their version",
+      diskEntry: { ...entry("a.md"), size: 13, modified: 2000 },
+    });
+    expect(vault.saveStateFor("a.md")).toBe("conflict");
+    expect(vault.content).toBe("my edits");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(api.writeFile).not.toHaveBeenCalled();
+    // Typing during a conflict must not restart autosave either.
+    vault.update("my edits, more");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(api.writeFile).not.toHaveBeenCalled();
+  });
+
+  it("an external edit on a clean buffer reloads without a conflict", async () => {
+    vault.entries = [entry("a.md")];
+    await vault.newTab();
+    await vault.openFile("a.md");
+    vi.mocked(api.readFileMeta).mockImplementation(async () => ({
+      content: "fresh from disk",
+      entry: { ...entry("a.md"), size: 15, modified: 2000 },
+    }));
+    emit([change("modified", "a.md", { ...entry("a.md"), size: 15, modified: 2000 })]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vault.conflictFor("a.md")).toBeNull();
+    expect(vault.content).toBe("fresh from disk");
+  });
+
+  it("identical disk content is adopted silently instead of raising a conflict", async () => {
+    await conflicted("my edits", { ...entry("a.md"), size: 8, modified: 2000 });
+    expect(vault.conflictFor("a.md")).toBeNull();
+    expect(vault.dirty).toBe(false);
+    // The next save is checked against the adopted disk state.
+    vault.update("next");
+    await vault.flush();
+    expect(api.writeFile).toHaveBeenLastCalledWith("a.md", "next", { modified: 2000, size: 8 });
+  });
+
+  it("the echo of our own save never raises a conflict", async () => {
+    vault.entries = [entry("a.md")];
+    await vault.newTab();
+    await vault.openFile("a.md");
+    vault.update("saved text");
+    await vault.flush();
+    vault.update("more edits");
+    emit([change("modified", "a.md", entry("a.md"))]);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(vault.conflictFor("a.md")).toBeNull();
+    expect(api.writeFile).toHaveBeenCalledTimes(2);
+  });
+
+  it("keep mine writes the local text against the disk state of the conflict", async () => {
+    const diskEntry = await conflicted();
+    await vault.resolveConflictKeepMine("a.md");
+    expect(api.writeFile).toHaveBeenCalledWith("a.md", "my edits", { modified: diskEntry.modified, size: diskEntry.size });
+    expect(vault.conflictFor("a.md")).toBeNull();
+    expect(vault.dirty).toBe(false);
+    expect(vault.content).toBe("my edits");
+  });
+
+  it("take theirs loads the disk version and drops the local edits", async () => {
+    const diskEntry = await conflicted();
+    await vault.resolveConflictTakeTheirs("a.md");
+    expect(api.writeFile).not.toHaveBeenCalled();
+    expect(vault.conflictFor("a.md")).toBeNull();
+    expect(vault.content).toBe("their version");
+    expect(vault.dirty).toBe(false);
+    // The next save expects the taken disk state.
+    vault.update("edit after take");
+    await vault.flush();
+    expect(api.writeFile).toHaveBeenLastCalledWith("a.md", "edit after take", { modified: diskEntry.modified, size: diskEntry.size });
+  });
+
+  it("a merged version is saved against the disk state of the conflict", async () => {
+    const diskEntry = await conflicted();
+    await vault.resolveConflictMerged("a.md", "merged text");
+    expect(api.writeFile).toHaveBeenCalledWith("a.md", "merged text", { modified: diskEntry.modified, size: diskEntry.size });
+    expect(vault.conflictFor("a.md")).toBeNull();
+    expect(vault.content).toBe("merged text");
+    expect(vault.dirty).toBe(false);
+  });
+
+  it("a second external edit during resolution raises a new conflict", async () => {
+    await conflicted();
+    vi.mocked(api.writeFile).mockRejectedValueOnce(new Error("The file changed on disk: a.md"));
+    vi.mocked(api.readFileMeta).mockImplementation(async () => ({
+      content: "yet another version",
+      entry: { ...entry("a.md"), size: 19, modified: 3000 },
+    }));
+    await vault.resolveConflictKeepMine("a.md");
+    expect(vault.conflictFor("a.md")?.diskContent).toBe("yet another version");
+    expect(vault.dirty).toBe(true);
+  });
+
+  it("a write refused by the backend becomes a conflict, not a save error", async () => {
+    vault.entries = [entry("a.md")];
+    await vault.newTab();
+    await vault.openFile("a.md");
+    vault.update("my edits");
+    vi.mocked(api.writeFile).mockRejectedValueOnce(new Error("The file changed on disk: a.md"));
+    vi.mocked(api.readFileMeta).mockImplementation(async () => ({
+      content: "their version",
+      entry: { ...entry("a.md"), size: 13, modified: 2000 },
+    }));
+    await vault.flush();
+    expect(vault.conflictFor("a.md")?.kind).toBe("modified");
+    expect(vault.error).toBeNull();
+    expect(vault.dirty).toBe(true);
+  });
+
+  it("an external deletion keeps the dirty buffer and its tab open", async () => {
+    vault.entries = [entry("a.md")];
+    await vault.newTab();
+    await vault.openFile("a.md");
+    vault.update("my edits");
+    vi.mocked(api.readFile).mockRejectedValueOnce(new Error("not found"));
+    emit([change("removed", "a.md")]);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(vault.conflictFor("a.md")?.kind).toBe("removed");
+    expect(vault.openPath).toBe("a.md");
+    expect(vault.content).toBe("my edits");
+    expect(api.writeFile).not.toHaveBeenCalled();
+  });
+
+  it("keep mine on a deleted file recreates it and its entry", async () => {
+    vault.entries = [entry("a.md")];
+    await vault.newTab();
+    await vault.openFile("a.md");
+    vault.update("my edits");
+    vi.mocked(api.readFile).mockRejectedValueOnce(new Error("not found"));
+    emit([change("removed", "a.md")]);
+    await vi.advanceTimersByTimeAsync(0);
+    vault.entries = [];
+    await vault.resolveConflictKeepMine("a.md");
+    // No expected state: the file is gone, the write recreates it.
+    expect(api.writeFile).toHaveBeenCalledWith("a.md", "my edits", undefined);
+    expect(vault.conflictFor("a.md")).toBeNull();
+    expect(vault.entryAt("a.md")).toBeDefined();
+  });
+
+  it("take theirs on a deleted file closes the tab and drops the buffer", async () => {
+    vault.entries = [entry("a.md")];
+    await vault.newTab();
+    await vault.openFile("a.md");
+    vault.update("my edits");
+    vi.mocked(api.readFile).mockRejectedValueOnce(new Error("not found"));
+    emit([change("removed", "a.md")]);
+    await vi.advanceTimersByTimeAsync(0);
+    await vault.resolveConflictTakeTheirs("a.md");
+    expect(vault.openPath).toBeNull();
+    expect(vault.conflictFor("a.md")).toBeNull();
+    expect(api.writeFile).not.toHaveBeenCalled();
+  });
+
+  it("an external deletion of a clean buffer still closes its tab", async () => {
+    vault.entries = [entry("a.md")];
+    await vault.newTab();
+    await vault.openFile("a.md");
+    vi.mocked(api.readFile).mockRejectedValueOnce(new Error("not found"));
+    emit([change("removed", "a.md")]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vault.openPath).toBeNull();
+    expect(vault.conflictFor("a.md")).toBeNull();
   });
 });
 

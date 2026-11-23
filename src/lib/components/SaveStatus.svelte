@@ -6,10 +6,18 @@
 
   const state = $derived(vault.saveStateFor(path));
   const label = $derived(
-    state === "pending" ? "Unsaved" : state === "saving" ? "Saving …" : state === "error" ? "Save failed" : "Saved",
+    state === "pending"
+      ? "Unsaved"
+      : state === "saving"
+        ? "Saving …"
+        : state === "error"
+          ? "Save failed"
+          : state === "conflict"
+            ? "Changed on disk"
+            : "Saved",
   );
   const tone = $derived(
-    state === "pending"
+    state === "pending" || state === "conflict"
       ? "text-warning"
       : state === "saving"
         ? "text-violet-300"
@@ -18,7 +26,7 @@
           : "text-zinc-500",
   );
   const dot = $derived(
-    state === "pending"
+    state === "pending" || state === "conflict"
       ? "bg-warning"
       : state === "saving"
         ? "bg-violet-400"

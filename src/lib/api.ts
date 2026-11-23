@@ -31,6 +31,18 @@ export interface SearchHit {
   snippet: string;
 }
 
+/** A file's text with the disk state it was read at (see `dvoix_core::vault::FileRead`). */
+export interface FileRead {
+  content: string;
+  entry: VaultEntry;
+}
+
+/** The disk state a save expects; a mismatch means the file changed on disk. */
+export interface ExpectedState {
+  modified: number;
+  size: number;
+}
+
 export interface NoteSummary {
   path: string;
   title: string;
@@ -163,7 +175,20 @@ export const api = {
   listEntries: () => invoke<VaultEntry[]>("list_entries"),
   listHiddenEntries: (filter: HiddenFilter) => invoke<VaultEntry[]>("list_hidden_entries", { filter }),
   readFile: (path: string) => invoke<string>("read_file", { path }),
-  writeFile: (path: string, content: string) => invoke<VaultEntry>("write_file", { path, content }),
+  /** Reads a file with its disk state, the base for a conflict-checked save. */
+  readFileMeta: (path: string) => invoke<FileRead>("read_file_meta", { path }),
+  /**
+   * Writes a file. With `expected` (the disk state last read or written) the
+   * backend refuses the write with "The file changed on disk: …" when the
+   * file changed in between; without it the write is unconditional.
+   */
+  writeFile: (path: string, content: string, expected?: ExpectedState) =>
+    invoke<VaultEntry>("write_file", {
+      path,
+      content,
+      expectedModified: expected?.modified ?? null,
+      expectedSize: expected?.size ?? null,
+    }),
   renderMarkdown: (content: string) => invoke<RenderedNote>("render_markdown", { content }),
   createFile: (path: string, content: string) => invoke<VaultEntry>("create_file", { path, content }),
   /** Reads any file as bytes (images and other attachments). */
