@@ -7,6 +7,7 @@
 //   .dvoix/hotkeys.json             keyboard shortcut overrides per command
 //   .dvoix/workspace.json           open tabs, pins, split, side panel, expanded folders
 //   .dvoix/trash.json               original paths and deletion times for items in .trash/
+//   .dvoix/bookmarks.json           bookmarked notes and folders, in panel order
 //   .dvoix/snippets/*.css           user CSS snippets
 //   .dvoix/plugins/<id>/data.json   settings of one plugin
 //   .dvoix/plugins/<id>/manifest.json, main.js, styles.css   a plugin from the store

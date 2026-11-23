@@ -98,7 +98,7 @@ pub struct Vault {
     root: PathBuf,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultEntry {
     /// Path relative to the vault root, `/`-separated.
@@ -110,6 +110,16 @@ pub struct VaultEntry {
     pub size: u64,
     /// Modification time in milliseconds since the Unix epoch.
     pub modified: u64,
+}
+
+/// A file's text together with the disk state it was read at. The editor
+/// keeps the entry as its save base: a later write can prove with it that
+/// nobody else changed the file in between (see `Vault::write_checked`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileRead {
+    pub content: String,
+    pub entry: VaultEntry,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -355,10 +365,48 @@ impl Vault {
         Ok(fs::read_to_string(self.resolve(rel)?)?)
     }
 
+    /// Reads a file together with its metadata (size, modification time), so
+    /// the caller can detect later external changes before writing.
+    pub fn read_with_meta(&self, rel: &str) -> Result<FileRead> {
+        let content = self.read(rel)?;
+        let entry = self.entry(rel)?;
+        Ok(FileRead { content, entry })
+    }
+
     /// Writes atomically: content goes to a temp file first which is then
     /// renamed over the target, so a crash never leaves a half-written note.
     pub fn write(&self, rel: &str, content: &str) -> Result<VaultEntry> {
         self.write_bytes(rel, content.as_bytes())
+    }
+
+    /// Writes like `write`, but refuses when the file no longer matches the
+    /// state the caller last saw (`expected_modified`/`expected_size` from a
+    /// read or an earlier write). An external edit in between then ends in
+    /// `Error::Conflict` instead of being silently overwritten. Both values
+    /// are compared because some file systems only have whole-second mtimes.
+    /// Without expectations this behaves exactly like `write`.
+    pub fn write_checked(
+        &self,
+        rel: &str,
+        content: &str,
+        expected_modified: Option<u64>,
+        expected_size: Option<u64>,
+    ) -> Result<VaultEntry> {
+        if expected_modified.is_some() || expected_size.is_some() {
+            let current = match self.entry(rel) {
+                Ok(entry) => Some(entry),
+                Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e),
+            };
+            let matches = current.is_some_and(|entry| {
+                expected_modified.is_none_or(|m| entry.modified == m)
+                    && expected_size.is_none_or(|s| entry.size == s)
+            });
+            if !matches {
+                return Err(Error::Conflict(rel.to_string()));
+            }
+        }
+        self.write(rel, content)
     }
 
     /// Reads any file as bytes (images and other attachments).
@@ -778,6 +826,85 @@ mod tests {
     }
 
     #[test]
+    fn read_with_meta_returns_text_and_disk_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        let written = vault.write("note.md", "hello").unwrap();
+        let read = vault.read_with_meta("note.md").unwrap();
+        assert_eq!(read.content, "hello");
+        assert_eq!(read.entry, written);
+    }
+
+    #[test]
+    fn write_checked_accepts_a_matching_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        let base = vault.write("note.md", "one").unwrap();
+        let next = vault
+            .write_checked("note.md", "two", Some(base.modified), Some(base.size))
+            .unwrap();
+        assert_eq!(vault.read("note.md").unwrap(), "two");
+        // Chained writes work: the entry of a write is the base of the next.
+        vault
+            .write_checked("note.md", "three", Some(next.modified), Some(next.size))
+            .unwrap();
+        assert_eq!(vault.read("note.md").unwrap(), "three");
+    }
+
+    #[test]
+    fn write_checked_refuses_an_external_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        let base = vault.write("note.md", "mine").unwrap();
+        // Somebody else writes the file (another editor, git, a sync tool).
+        fs::write(dir.path().join("note.md"), "theirs, longer").unwrap();
+        let result = vault.write_checked(
+            "note.md",
+            "mine again",
+            Some(base.modified),
+            Some(base.size),
+        );
+        assert!(matches!(result, Err(Error::Conflict(_))));
+        assert_eq!(vault.read("note.md").unwrap(), "theirs, longer");
+    }
+
+    #[test]
+    fn write_checked_compares_size_even_when_mtime_is_coarse() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        let base = vault.write("note.md", "mine").unwrap();
+        // Same length and a whole-second file system could hide the mtime
+        // change; a different size must still be caught.
+        let mut entry = base.clone();
+        entry.size += 1;
+        let result = vault.write_checked("note.md", "x", Some(base.modified), Some(entry.size));
+        assert!(matches!(result, Err(Error::Conflict(_))));
+        // And the other way around: right size, wrong time.
+        let result = vault.write_checked("note.md", "x", Some(base.modified + 1), Some(base.size));
+        assert!(matches!(result, Err(Error::Conflict(_))));
+        assert_eq!(vault.read("note.md").unwrap(), "mine");
+    }
+
+    #[test]
+    fn write_checked_refuses_a_deleted_file_but_plain_write_recreates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        let base = vault.write("note.md", "mine").unwrap();
+        fs::remove_file(dir.path().join("note.md")).unwrap();
+        let result = vault.write_checked(
+            "note.md",
+            "mine again",
+            Some(base.modified),
+            Some(base.size),
+        );
+        assert!(matches!(result, Err(Error::Conflict(_))));
+        assert!(!dir.path().join("note.md").exists());
+        // Without expectations the old behavior stays: the file is created.
+        vault.write_checked("note.md", "back", None, None).unwrap();
+        assert_eq!(vault.read("note.md").unwrap(), "back");
+    }
+
+    #[test]
     fn binary_files_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let vault = Vault::open(dir.path()).unwrap();
@@ -931,6 +1058,46 @@ mod tests {
         assert!(vault.restore_from_trash("../note.md", None, false).is_err());
         assert!(vault.trash(".trash").is_err());
         assert!(vault.trash(".dvoix").is_err());
+    }
+
+    #[test]
+    fn creates_a_note_with_its_folders_once() {
+        // What "open today's daily note" does on disk: the folders of the date
+        // format are created, and a second run must not overwrite the note.
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        let path = "Daily/2026/11/2026-11-23.md";
+        vault.create(path, "# 2026-11-23\n").unwrap();
+        assert_eq!(vault.read(path).unwrap(), "# 2026-11-23\n");
+        assert!(dir.path().join("Daily/2026/11").is_dir());
+
+        let again = vault.create(path, "would overwrite");
+        assert!(matches!(again, Err(Error::AlreadyExists(_))));
+        assert_eq!(vault.read(path).unwrap(), "# 2026-11-23\n");
+    }
+
+    #[test]
+    fn bookmarks_live_in_the_vault_and_survive_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = "{\"items\":[{\"type\":\"file\",\"path\":\"Notes/idea.md\"}]}\n";
+        {
+            let vault = Vault::open(dir.path()).unwrap();
+            vault.create("Notes/idea.md", "# Idea").unwrap();
+            vault.write_config("bookmarks.json", json).unwrap();
+            // The list belongs to the vault, not to the visible file tree.
+            assert!(
+                !vault
+                    .list()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.path.contains("bookmarks"))
+            );
+        }
+        let reopened = Vault::open(dir.path()).unwrap();
+        assert_eq!(
+            reopened.read_config("bookmarks.json").unwrap().as_deref(),
+            Some(json)
+        );
     }
 
     #[test]

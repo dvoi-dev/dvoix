@@ -6,7 +6,7 @@
 //! window (on Windows it stays white until the work is done).
 
 use dvoix_core::{
-    GraphData, HiddenFilter, NoteAliases, NoteSummary, RenderedNote, SearchHit, TaskItem,
+    FileRead, GraphData, HiddenFilter, NoteAliases, NoteSummary, RenderedNote, SearchHit, TaskItem,
     TrashedEntry, VaultEntry,
     index::TagCount,
     link_rewrite::{LinkRewriter, Move},
@@ -114,10 +114,31 @@ pub fn read_file(state: State<AppState>, path: String) -> CmdResult<String> {
     with_ws(&state, |ws| ws.vault.read(&path).map_err(err))
 }
 
+/// Reads a file together with its disk state (size, modification time). The
+/// editor keeps that state as the base of its next save, so an external edit
+/// in between is caught instead of overwritten (see `write_file`).
 #[tauri::command(async)]
-pub fn write_file(state: State<AppState>, path: String, content: String) -> CmdResult<VaultEntry> {
+pub fn read_file_meta(state: State<AppState>, path: String) -> CmdResult<FileRead> {
+    with_ws(&state, |ws| ws.vault.read_with_meta(&path).map_err(err))
+}
+
+/// Writes a file. With `expected_modified`/`expected_size` (the disk state
+/// the caller last saw) the write is refused with a conflict error when the
+/// file changed on disk in between; without them it writes unconditionally,
+/// as store plugins expect.
+#[tauri::command(async)]
+pub fn write_file(
+    state: State<AppState>,
+    path: String,
+    content: String,
+    expected_modified: Option<u64>,
+    expected_size: Option<u64>,
+) -> CmdResult<VaultEntry> {
     with_ws(&state, |ws| {
-        let entry = ws.vault.write(&path, &content).map_err(err)?;
+        let entry = ws
+            .vault
+            .write_checked(&path, &content, expected_modified, expected_size)
+            .map_err(err)?;
         reindex(ws, &path)?;
         Ok(entry)
     })

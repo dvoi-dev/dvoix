@@ -17,7 +17,7 @@ A desktop app for notes, project management, tracking, and whatever comes later.
 - Quick switcher (Ctrl/Cmd + O) with fuzzy search over all files: `mtg plan` finds `Projects/Meeting-Planning`. Enter opens, Ctrl + Enter opens in a new tab, and if the note does not exist it is created
 - Command palette (Ctrl/Cmd + P): fuzzy search over every registered command, including commands without a shortcut, with the plugin name and the effective shortcut. Unavailable commands are dimmed
 - Find and replace in the open note (Ctrl/Cmd + F / Ctrl/Cmd + H): match case, regular expressions, whole words, replace next or all. In the reading view it switches to the editing view first
-- Keyboard shortcuts: Ctrl + T new tab, Ctrl + W close tab, Ctrl + Tab / Ctrl + Shift + Tab (or Ctrl + Page Down/Up) switch tabs, Ctrl + \ split right, Alt + Left / Alt + Right (or the Back / Forward buttons) navigate history, Ctrl + ] show/hide the right sidebar, Ctrl + Enter commit changes, Ctrl + Shift + H open history, Ctrl + , settings. Every command shortcut can be rebound under Settings → Keyboard shortcuts; conflicts are shown before a binding is replaced
+- Keyboard shortcuts: Ctrl + T new tab, Ctrl + W close tab, Ctrl + Tab / Ctrl + Shift + Tab (or Ctrl + Page Down/Up) switch tabs, Ctrl + \ split right, Alt + Left / Alt + Right (or the Back / Forward buttons) navigate history, Ctrl + ] show/hide the right sidebar, Ctrl + Shift + F full-text search, Ctrl + Shift + I insert template, Ctrl + Shift + D open today's daily note, Ctrl + Alt + Left/Right previous/next daily note, Ctrl + Shift + B bookmark the open note, Ctrl + Enter commit changes, Ctrl + Shift + H open history, Ctrl + , settings. Every command shortcut can be rebound under Settings → Keyboard shortcuts; conflicts are shown before a binding is replaced
 - Clickable folder breadcrumbs in the file header reveal the parent folder in the explorer
 - Markdown editor (CodeMirror 6) with YAML frontmatter, `[[wikilinks]]` (Ctrl/Cmd + click opens or creates the note) and `#tags`
 - Floating selection toolbar when selecting text in the Markdown editor (Bold, Italic, Strikethrough, Inline code, Wikilink, Heading, Quote), plus Ctrl/Cmd + B and Ctrl/Cmd + I shortcuts
@@ -29,18 +29,21 @@ A desktop app for notes, project management, tracking, and whatever comes later.
 - Link suggestions: after `[[` the editor suggests matching notes and files (fuzzy search as in the quick switcher); Enter or Tab inserts the link including `]]`
 - Three views like in Obsidian: **Read** (the note as a rendered page with the properties from the frontmatter), **Edit** (live preview: Markdown syntax is only visible on the line with the cursor, `## ` makes a heading immediately, tables stay tables while editing, see below) and **Source** (the raw Markdown). Switch with the Read / Edit / Source segmented control at the top right of the note or the view pill in the status bar, with Ctrl + E between Read and Edit, and Ctrl + Shift + E between Source and Edit. The view a note opens in is set in the settings.
 - Bottom status bar showing word count, character count, reading time, selected words/characters, cursor line/column, save state and the active view mode
-- Automatic saving, written atomically (first a temporary file, then rename). The pane header and status bar show Saved, Unsaved, Saving or Save failed, with a retry button on failure. A failed save keeps the note and its tab open; deleting or moving the affected file is blocked until the save succeeds
-- Changes from outside (VS Code, sync tools, git) show up in the app immediately
+- Automatic saving, written atomically (first a temporary file, then rename). The pane header and status bar show Saved, Unsaved, Saving, Save failed or Changed on disk, with a retry button on failure. A failed save keeps the note and its tab open; deleting or moving the affected file is blocked until the save succeeds
+- Changes from outside (VS Code, sync tools, git) show up in the app immediately. If a note with unsaved edits is changed or deleted on disk, saving pauses and a banner offers **Keep mine**, **Take theirs** (or "Discard & close" for a deleted file) and **Compare**: a side-by-side merge view where single chunks can be taken from disk before applying. Nothing is overwritten silently
 - Full-text search, tag overview and backlinks ("Linked from")
 - Tasks: ordinary Markdown checkboxes in any note, optionally with a due date and priority. In the editor they are always clickable; the task overview in the sidebar collects all tasks of the vault (grouped by due date or by note)
+- Templates: insert a note from a template folder at the cursor (Ctrl/Cmd + Shift + I), with `{{title}}`, `{{date}}` and `{{time}}` filled in, or create a new note from one via the explorer's right-click menu
+- Daily notes: open or create today's note from the calendar icon in the icon bar or with Ctrl/Cmd + Shift + D, optionally from a template; Ctrl/Cmd + Alt + Left/Right jumps to the previous or next existing daily note
+- Bookmarks: pin notes and folders to a panel in the sidebar (Ctrl/Cmd + Shift + B bookmarks the open note), reorder them by dragging, and toggle them from the right-click menu of the explorer and the tab bar
 - Graph view (Ctrl/Cmd + G or the network icon in the icon bar) in its own tab: notes as dots, connected by links, by their folders (folders as their own nodes) and/or by shared tags (tags as nodes or as direct lines). The graph starts with the whole tab; the controls open beside it (below it in narrow windows) via the sliders button or `C` and can be hidden again: filters (`projects #idea -archive`), single notes, attachments and missing notes on/off, colors by folder or tag with a legend, size by number of connections, labels, arrows, line width, the zoom level from which titles appear, and the layout forces. Hovering highlights the neighbors and previews the note in a card with the path, tag and connection count; the highlight follows the pointer, while the card stays available until the pointer leaves the graph or the background is clicked. Click opens the note in a new tab, right-click or the card's Focus button keeps only the note's neighborhood (1–3 hops). The toolbar zooms, fits, pauses and restarts the layout; on the focused canvas, `+`/`-` zoom, `0` fits, Space pauses, `C` toggles the controls and Esc clears the focus
-- Basic functions are always on: file explorer, search, tags, backlinks, link suggestions, clickable checkboxes, quick switcher, command palette, document search, tabs, split view, pinned tabs, views, status bar, formatting toolbar and trash. Optional functions are core plugins that can each be turned off in the settings (gear icon at the bottom of the icon bar, or Ctrl/Cmd + ,): tasks, canvas, graph, the right sidebar and hidden files (folders such as `.obsidian`, off at first)
+- Basic functions are always on: file explorer, search, tags, backlinks, link suggestions, clickable checkboxes, quick switcher, command palette, document search, tabs, split view, pinned tabs, views, status bar, formatting toolbar and trash. Optional functions are core plugins that can each be turned off in the settings (gear icon at the bottom of the icon bar, or Ctrl/Cmd + ,): tasks, canvas, graph, templates, daily notes, bookmarks, the right sidebar and hidden files (folders such as `.obsidian`, off at first)
 - Plugin store in the settings: search, install, update and remove additional plugins. Official plugins work immediately; community plugins only after a separate switch with a warning (see "Plugin store" below)
 - App updates: Settings → About shows the running version and checks GitHub releases. Installing an update first saves all pending changes, then downloads it and restarts into it; a failed install stays in the banner with a retry. The update feed only serves published releases
 - Accessibility: dialogs keep the keyboard focus inside and give it back on close, the file tree is fully keyboard-navigable, and animations respect the system's "reduce motion" setting
 - Settings: editor (line length, line numbers, spellcheck), appearance (themes: Dark, Midnight, Slate, Light; preset or custom hex accent colors; editor and interface fonts; font size sliders; CSS snippets from `.dvoix/snippets/`), rebindable keyboard shortcuts with conflict handling, and separate options per feature or plugin
 - All settings of a vault live inside the vault under `.dvoix/` (see below), so they move along when you copy or sync the folder
-- Projects and Git are official plugins in the plugin store: [dvoix-projects](https://github.com/dvoi-dev/dvoix-projects) and [dvoix-git](https://github.com/dvoi-dev/dvoix-git)
+- Official plugins in the plugin store: [dvoix-projects](https://github.com/dvoi-dev/dvoix-projects), [dvoix-git](https://github.com/dvoi-dev/dvoix-git), [dvoix-kanban](https://github.com/dvoi-dev/dvoix-kanban) (`.kboard`) and [dvoix-crew](https://github.com/dvoi-dev/dvoix-crew)
 - First custom file type: `.canvas` in the open [JSON Canvas format](https://jsoncanvas.org) (move cards, double-click creates a card)
 
 ## Tech stack
@@ -95,6 +98,7 @@ Like `.obsidian/` in Obsidian. Everything that belongs to the vault lives here; 
   hotkeys.json              keyboard shortcut overrides per command (missing = defaults, [] = unbound)
   workspace.json            open tabs, pinned tabs, split, active panel, width, expanded folders
   trash.json                original paths and deletion times for items in .trash/
+  bookmarks.json            bookmarked notes and folders, in the order of the panel
   snippets/*.css            user CSS snippets
   plugins/<id>/data.json    settings of a plugin (e.g. plugins/tasks/data.json)
   plugins/<id>/manifest.json, main.js, styles.css   a plugin from the store
@@ -120,6 +124,7 @@ Every function hooks into the app through a small API, the same for core feature
 | `ctx.addStatusBarItem(...)` | item in the bottom status bar (`align: "left" \| "right"`) |
 | `ctx.addOverlay(...)` | dialog on the top layer (quick switcher) |
 | `ctx.addExplorerEntries(...)` | extra entries only in the file explorer (hidden folders) |
+| `ctx.addFileMenu(...)` / `ctx.addTabMenu(...)` | items in the right-click menu of the file explorer or of a tab ("Bookmark", "New note from template") |
 | `ctx.registerView(...)` | own view that runs like a file in a tab (graph); open with `vault.openViewTab(id)` |
 | `ctx.addSettingTab(...)` | own page in the settings |
 | `ctx.loadData()` / `ctx.saveData()` | own data in `.dvoix/plugins/<id>/data.json` |
@@ -140,6 +145,37 @@ The "Right sidebar" plugin adds a second sidebar on the right edge of the window
 - The **panels are rearranged** by dragging their header, and removed with the × in it
 - The column is **resized** by dragging its left edge (double-click sets the standard width) and **hidden** with the button in the title row next to the window buttons (Ctrl/Cmd + ] does the same). A hidden sidebar is gone completely, the button stays
 - Which panels are in it, how wide it is and whether it is hidden are remembered per vault in `.dvoix/plugins/right-sidebar/data.json`
+
+### Templates
+
+The "Templates" plugin is on by default and can be turned off under Settings → Core plugins. It offers the Markdown notes of one vault folder (default `Templates`, subfolders included) as templates.
+
+| Command | What it does |
+| --- | --- |
+| Insert template (Ctrl/Cmd + Shift + I) | fuzzy picker over the templates; the chosen one is inserted where the cursor was (a selection is replaced). Only that range of the open note changes, the template file is only read |
+| New note from template | picker, then a name; creates `<folder>/<name>.md` and opens it. Also in the right-click menu of a folder and of the empty area of the explorer, so the note lands where you clicked |
+
+Variables are filled in when a template is used: `{{title}}` (name of the note without `.md`), `{{date}}` and `{{time}}`, each optionally with its own format (`{{date:YYYY}}`). Unknown placeholders stay as they are, so a template can keep `{{…}}` for other tools.
+
+Settings (in `.dvoix/plugins/templates/data.json`): `folder` (default `Templates`), `dateFormat` (default `YYYY-MM-DD`) and `timeFormat` (default `HH:mm`). Formats use the tokens of Obsidian (moment.js): `YYYY`, `YY`, `MMMM`, `MMM`, `MM`, `M`, `DD`, `D`, `dddd`, `ddd`, `HH`, `H`, `mm`, `m`, `ss`, `s`; text in square brackets stays literal (`[Daily]/YYYY-MM-DD`). Month and weekday names are English.
+
+### Daily notes
+
+The "Daily notes" plugin is on by default. The calendar icon in the icon bar and the command "Open today's daily note" (Ctrl/Cmd + Shift + D) open the note of the day and create it when it is missing, including the folders of its path. A second run opens the existing note; nothing is written twice.
+
+"Open previous daily note" and "Open next daily note" (Ctrl/Cmd + Alt + Left / Right) jump to the closest existing daily note before or after the open one (before or after today when another note is open). They only open what exists, so navigating never creates empty notes.
+
+Settings (in `.dvoix/plugins/daily-notes/data.json`): `folder` (default `Daily`), `dateFormat` (default `YYYY-MM-DD`, may contain folders: `YYYY/MM/YYYY-MM-DD` groups the notes by year and month), `templatePath` (a note of the vault, `""` = the note starts with its title as a heading) and `timeFormat` (default `HH:mm`). The template uses the same variables as the Templates plugin and works with that plugin turned off; `{{date}}` uses the date format above. A template that cannot be read leaves a toast and the note is created without it.
+
+### Bookmarks
+
+The "Bookmarks" plugin is on by default and adds a panel to the sidebar with your favorite notes and folders.
+
+- **Add and remove** from the right-click menu of the file explorer (notes and folders) and of a tab, with the × in the panel, or with "Bookmark active note" (Ctrl/Cmd + Shift + B)
+- **Open** with a click (Ctrl/Cmd + click or middle click opens a new tab); a folder is revealed in the file explorer
+- **Reorder** by dragging a row, or with "Move up" / "Move down" in its right-click menu
+- The list lives in `.dvoix/bookmarks.json`, so it survives restarts and moves with the vault. Renaming or moving a bookmarked note in dvoix updates the bookmark, including everything below a renamed folder. A target renamed outside the app is shown as "Missing" until you remove it
+- Unknown item kinds and fields in the file are kept when saving, so a newer version can add kinds (searches, headings) without losing them
 
 ### Plugin store
 
@@ -219,7 +255,7 @@ npm run tauri build    # build the installer
 
 A local `tauri build` makes plain installers without update bundles, so it needs no signing key. The release workflow adds `src-tauri/tauri.release.conf.json`, which turns on the signed update bundles.
 
-After a pull that brings new dependencies, run `npm install` once. `npm run dev`, `npm run check` and `npm run build` check first whether all packages from `package.json` are installed, and say what is missing – instead of failing later in Vite with "Failed to resolve import …".
+After a pull that brings new dependencies, run `npm install` once. `npm run dev`, `npm run check`, `npm run build` and `npm run test` first check that your Node.js version matches `engines.node` in `package.json` (see `.nvmrc`) and that all packages are installed, and say what is wrong – instead of failing later in Vite with "Failed to resolve import …".
 
 To check:
 
@@ -250,7 +286,7 @@ Renovate (`renovate.json`) keeps npm, Cargo and GitHub Actions dependencies up t
 
 ## Next steps (ideas)
 
-- Kanban board (`.board`) and tracking (`.track`) as official plugins in the store
+- Tracking (`.track`) as an official plugin in the store
 - `tantivy` instead of FTS5, if search needs to do more
 
 ## License

@@ -31,6 +31,18 @@ export interface SearchHit {
   snippet: string;
 }
 
+/** A file's text with the disk state it was read at (see `dvoix_core::vault::FileRead`). */
+export interface FileRead {
+  content: string;
+  entry: VaultEntry;
+}
+
+/** The disk state a save expects; a mismatch means the file changed on disk. */
+export interface ExpectedState {
+  modified: number;
+  size: number;
+}
+
 export interface NoteSummary {
   path: string;
   title: string;
@@ -46,6 +58,27 @@ export interface TagCount {
 export interface NoteAliases {
   path: string;
   aliases: string[];
+}
+
+/** A note whose links a rename rewrote, with its text from before the rewrite. */
+export interface UpdatedLinkFile {
+  entry: VaultEntry;
+  previousContent: string;
+}
+
+/** What `renameWithLinks` changed: the moved entry and every rewritten note. */
+export interface RenameResult {
+  entry: VaultEntry;
+  updatedFiles: UpdatedLinkFile[];
+}
+
+/** What `undoRenameWithLinks` changed back. */
+export interface UndoRenameResult {
+  entry: VaultEntry;
+  /** Notes whose text was restored. */
+  restored: string[];
+  /** Notes that changed since the rename and were left alone. */
+  skipped: string[];
 }
 
 /** Everything the graph view needs (see `Index::graph` in `crates/dvoix-core/src/index.rs`). */
@@ -169,9 +202,23 @@ export const api = {
   listEntries: () => invoke<VaultEntry[]>("list_entries"),
   listHiddenEntries: (filter: HiddenFilter) => invoke<VaultEntry[]>("list_hidden_entries", { filter }),
   readFile: (path: string) => invoke<string>("read_file", { path }),
-  writeFile: (path: string, content: string) => invoke<VaultEntry>("write_file", { path, content }),
+  /** Reads a file with its disk state, the base for a conflict-checked save. */
+  readFileMeta: (path: string) => invoke<FileRead>("read_file_meta", { path }),
+  /**
+   * Writes a file. With `expected` (the disk state last read or written) the
+   * backend refuses the write with "The file changed on disk: …" when the
+   * file changed in between; without it the write is unconditional.
+   */
+  writeFile: (path: string, content: string, expected?: ExpectedState) =>
+    invoke<VaultEntry>("write_file", {
+      path,
+      content,
+      expectedModified: expected?.modified ?? null,
+      expectedSize: expected?.size ?? null,
+    }),
   /** Renders a note; with `heading`, only that section (`![[note#heading]]`). */
-  renderMarkdown: (content: string, heading?: string) => invoke<RenderedNote>("render_markdown", { content, heading }),
+  renderMarkdown: (content: string, heading?: string) =>
+    invoke<RenderedNote>("render_markdown", { content, heading }),
   createFile: (path: string, content: string) => invoke<VaultEntry>("create_file", { path, content }),
   /** Reads any file as bytes (images and other attachments). */
   readBinary: (path: string) => invoke<ArrayBuffer>("read_binary", { path }),
@@ -180,6 +227,11 @@ export const api = {
     invoke<VaultEntry>("create_binary", bytes, { headers: { path: encodeURIComponent(path) } }),
   createFolder: (path: string) => invoke<VaultEntry>("create_folder", { path }),
   renameEntry: (from: string, to: string) => invoke<VaultEntry>("rename_entry", { from, to }),
+  /** Renames or moves an entry and rewrites the links of other notes. */
+  renameWithLinks: (from: string, to: string) => invoke<RenameResult>("rename_with_links", { from, to }),
+  /** Moves a renamed entry back and restores the notes `renameWithLinks` rewrote. */
+  undoRenameWithLinks: (from: string, to: string, snapshots: UpdatedLinkFile[]) =>
+    invoke<UndoRenameResult>("undo_rename_with_links", { from, to, snapshots }),
   trashEntry: (path: string) => invoke<TrashedEntry>("trash_entry", { path }),
   listTrash: () => invoke<TrashedEntry[]>("list_trash"),
   restoreTrashEntry: (name: string, target: string | null = null, renameOnConflict = false) =>

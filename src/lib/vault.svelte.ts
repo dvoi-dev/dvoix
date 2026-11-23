@@ -1,7 +1,15 @@
 // App state for the open vault and the open file, shared by all components.
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { untrack } from "svelte";
-import { api, onVaultChanged, type NoteAliases, type VaultChange, type VaultEntry, type VaultInfo } from "./api";
+import {
+  api,
+  onVaultChanged,
+  type NoteAliases,
+  type UpdatedLinkFile,
+  type VaultChange,
+  type VaultEntry,
+  type VaultInfo,
+} from "./api";
 import { appEvents } from "./events";
 import { creatableFileTypes, type FileType } from "./filetypes";
 import { flushConfig } from "./config";
@@ -38,7 +46,19 @@ export interface SplitView {
   right: number;
 }
 
-export type SaveState = "saved" | "pending" | "saving" | "error";
+export type SaveState = "saved" | "pending" | "saving" | "error" | "conflict";
+
+/**
+ * An external change that collided with unsaved edits. Autosave is stopped
+ * until the user resolves it (keep mine, take theirs, or merge); nothing is
+ * written or discarded silently. `diskContent`/`diskEntry` are null when the
+ * file was deleted on disk.
+ */
+export interface FileConflict {
+  kind: "modified" | "removed";
+  diskContent: string | null;
+  diskEntry: VaultEntry | null;
+}
 
 /** One in-memory document per path, shared by every pane and tab showing it. */
 interface FileBuffer {
@@ -46,6 +66,26 @@ interface FileBuffer {
   dirty: boolean;
   saveState: SaveState;
   revision: number;
+  /** Disk state the content was last read from or saved at; the base of the next checked write. */
+  baseModified: number | null;
+  baseSize: number | null;
+  conflict: FileConflict | null;
+}
+
+const newBuffer = (content: string, base?: VaultEntry | null): FileBuffer => ({
+  content,
+  dirty: false,
+  saveState: "saved",
+  revision: 0,
+  baseModified: base?.modified ?? null,
+  baseSize: base?.size ?? null,
+  conflict: null,
+});
+
+/** What `read` returns: the text and, for a fresh disk read, its disk state. */
+interface ReadResult {
+  content: string;
+  entry: VaultEntry | null;
 }
 
 export interface OpenOptions {
@@ -145,7 +185,19 @@ class VaultStore {
   }
 
   saveStateFor(path: string | null): SaveState {
-    return path ? (this.buffers[path]?.saveState ?? "saved") : "saved";
+    if (!path) return "saved";
+    const buffer = this.buffers[path];
+    if (!buffer) return "saved";
+    return buffer.conflict ? "conflict" : buffer.saveState;
+  }
+
+  /** The external-change conflict of a path, while it is unresolved. */
+  conflictFor(path: string | null): FileConflict | null {
+    return path ? (this.buffers[path]?.conflict ?? null) : null;
+  }
+
+  get conflict(): FileConflict | null {
+    return this.conflictFor(this.openPath);
   }
 
   get canGoBack(): boolean {
@@ -326,6 +378,10 @@ class VaultStore {
     if (!this.info) return;
     this.selfWrites = [];
     await this.flush();
+    if (Object.values(this.buffers).some((buffer) => buffer.conflict)) {
+      this.error = "Some files changed on disk while you have unsaved edits. Resolve the conflicts before closing the vault.";
+      throw new Error(this.error);
+    }
     if (Object.values(this.buffers).some((buffer) => buffer.dirty)) {
       this.error = "Some files could not be saved. Retry saving before closing the vault.";
       throw new Error(this.error);
@@ -451,9 +507,15 @@ class VaultStore {
     if (visible.length) this.applyChanges(visible);
     for (const change of changes) {
       if (change.kind === "removed") void this.closeIfGone(change.path);
-      else if (change.kind === "modified") {
+      else {
+        // "created" on an open buffer means the file was recreated externally
+        // (atomic replace, sync tool): same flow as a modification.
         const buffer = this.buffers[change.path];
-        if (buffer && !buffer.dirty && !this.isSelfWrite(change)) void this.reloadBuffer(change.path);
+        if (!buffer || this.isSelfWrite(change)) continue;
+        // Unsaved edits must never be overwritten or reloaded away: stop
+        // autosave and let the user decide (keep, take, merge).
+        if (buffer.dirty || buffer.conflict) void this.markConflict(change.path, "modified", change.entry ?? null);
+        else void this.reloadBuffer(change.path);
       }
     }
   }
@@ -636,8 +698,8 @@ class VaultStore {
     const existing = this.visibleTabWithPath(path) ?? this.tabs.find((t) => t.path === path);
     if (existing) return this.activateTab(existing.id);
     const request = ++this.navigationId;
-    const content = await this.read(path);
-    if (content === null || request !== this.navigationId) return;
+    const read = await this.read(path);
+    if (read === null || request !== this.navigationId) return;
     const active = this.activeTab;
     if (active && !opts.newTab && !active.pinned && !(await this.flushBeforeReplace(active, request))) return;
     const target = this.activeTab;
@@ -651,7 +713,7 @@ class VaultStore {
       this.tabs.splice(target ? this.tabs.indexOf(target) + 1 : this.tabs.length, 0, tab);
       this.showInFocusedPane(tab.id);
     }
-    this.show(path, content);
+    this.show(path, read.content, null, read.entry);
   }
 
   /**
@@ -685,14 +747,14 @@ class VaultStore {
     if (!tab) return;
     const request = ++this.navigationId;
     const path = tab.path;
-    let content: string | null = null;
+    let read: ReadResult | null = null;
     if (path) {
       const buffer = this.buffers[path];
-      if (buffer) content = buffer.content;
+      if (buffer) read = { content: buffer.content, entry: null };
       else {
-        content = await this.read(path);
+        read = await this.read(path);
         if (request !== this.navigationId || !this.tabs.includes(tab) || tab.path !== path) return;
-        if (content === null) {
+        if (read === null) {
           tab.path = null;
           this.pruneBuffer(path);
         }
@@ -707,7 +769,7 @@ class VaultStore {
     this.activeTabId = id;
     if (tab.view) return this.show(null, "", tab.view);
     if (!tab.path) return this.show(null, "");
-    return this.show(tab.path, content ?? this.contentFor(tab.path));
+    return this.show(tab.path, read?.content ?? this.contentFor(tab.path), null, read?.entry ?? null);
   }
 
   /** Opens an empty tab next to the active one. */
@@ -802,14 +864,14 @@ class VaultStore {
   private async ensureTabBuffer(tab: Tab, request = this.navigationId): Promise<boolean> {
     const path = tab.path;
     if (!path || this.buffers[path]) return this.tabs.includes(tab);
-    const content = await this.read(path);
+    const read = await this.read(path);
     if (request !== this.navigationId || !this.tabs.includes(tab) || tab.path !== path) return false;
-    if (content === null) {
+    if (read === null) {
       tab.path = null;
       this.pruneBuffer(path);
       return false;
     }
-    if (!this.buffers[path]) this.buffers[path] = { content, dirty: false, saveState: "saved", revision: 0 };
+    if (!this.buffers[path]) this.buffers[path] = newBuffer(read.content, read.entry);
     return true;
   }
 
@@ -858,11 +920,12 @@ class VaultStore {
   }
 
   /** Reads `path` from its shared buffer or from disk; null if that fails. */
-  private async read(path: string): Promise<string | null> {
+  private async read(path: string): Promise<ReadResult | null> {
     const buffer = this.buffers[path];
-    if (buffer) return buffer.content;
+    if (buffer) return { content: buffer.content, entry: null };
     try {
-      return await api.readFile(path);
+      const fresh = await api.readFileMeta(path);
+      return { content: fresh.content, entry: fresh.entry };
     } catch (e) {
       this.error = String(e);
       return null;
@@ -870,8 +933,8 @@ class VaultStore {
   }
 
   /** Makes `path` (or the view `view`) the content of the active tab. */
-  private show(path: string | null, content: string, view: string | null = null) {
-    if (path && !this.buffers[path]) this.buffers[path] = { content, dirty: false, saveState: "saved", revision: 0 };
+  private show(path: string | null, content: string, view: string | null = null, base: VaultEntry | null = null) {
+    if (path && !this.buffers[path]) this.buffers[path] = newBuffer(content, base ?? this.entryAt(path));
     if (path) {
       this.recent = [path, ...this.recent.filter((p) => p !== path)].slice(0, RECENT_MAX);
       ui.reveal(path);
@@ -1048,10 +1111,17 @@ class VaultStore {
       () => true,
       () => false,
     );
-    if (!exists) {
-      for (const buffered of Object.keys(this.buffers)) if (gone(buffered)) this.discardBuffer(buffered);
-      await this.closeTabs(gone);
+    if (exists) return;
+    for (const buffered of Object.keys(this.buffers)) {
+      if (!gone(buffered)) continue;
+      const buffer = this.buffers[buffered];
+      // Unsaved edits must survive an external deletion: the buffer stays
+      // and the user decides (keep mine recreates the file, take theirs closes).
+      if (buffer.dirty || buffer.conflict) void this.markConflict(buffered, "removed", null);
+      else this.discardBuffer(buffered);
     }
+    const unprotected = (p: string) => gone(p) && !this.buffers[p]?.dirty && !this.buffers[p]?.conflict;
+    await this.closeTabs(unprotected);
   }
 
   // ---------------------------------------------------------------- files
@@ -1108,7 +1178,7 @@ class VaultStore {
     if (!path) return;
     let buffer = this.buffers[path];
     if (!buffer) {
-      buffer = { content, dirty: false, saveState: "saved", revision: 0 };
+      buffer = newBuffer(content, this.entryAt(path));
       this.buffers[path] = buffer;
     }
     if (content === buffer.content) return;
@@ -1121,6 +1191,9 @@ class VaultStore {
 
   private scheduleSave(path: string) {
     clearTimeout(this.saveTimers.get(path));
+    this.saveTimers.delete(path);
+    // An unresolved conflict stops autosave: only a resolution writes again.
+    if (this.buffers[path]?.conflict) return;
     this.saveTimers.set(
       path,
       setTimeout(() => {
@@ -1144,7 +1217,7 @@ class VaultStore {
         this.saveTimers.delete(path);
       }
       const buffer = this.buffers[path];
-      if (!buffer?.dirty) return;
+      if (!buffer?.dirty || buffer.conflict) return;
       const job = this.writeJobs.get(path);
       if (job) {
         await job;
@@ -1152,24 +1225,46 @@ class VaultStore {
       }
       const revision = buffer.revision;
       const content = buffer.content;
+      // The disk state of the last read or save: the backend refuses the
+      // write when the file changed in between (optimistic locking).
+      const expected =
+        buffer.baseModified !== null && buffer.baseSize !== null
+          ? { modified: buffer.baseModified, size: buffer.baseSize }
+          : undefined;
       buffer.saveState = "saving";
       const task = (async () => {
         try {
-          const entry = await api.writeFile(path, content);
+          const entry = await api.writeFile(path, content, expected);
           // Remember our write, so its watcher echo does not read the file back.
           this.noteWritten(entry);
           appEvents.emit("file-save", { path });
           if (this.buffers[path] === buffer && buffer.revision === revision) {
-            buffer.dirty = false;
-            buffer.saveState = "saved";
-            this.pruneBuffer(path);
+            buffer.baseModified = entry.modified;
+            buffer.baseSize = entry.size;
+            // A conflict that appeared while the write ran stays unresolved:
+            // the buffer must keep its protection until the user decides.
+            if (!buffer.conflict) {
+              buffer.dirty = false;
+              buffer.saveState = "saved";
+              this.pruneBuffer(path);
+            }
           }
         } catch (e) {
           if (this.buffers[path] === buffer) {
             buffer.dirty = true;
-            buffer.saveState = "error";
+            // The file changed on disk between read and write (the watcher
+            // had not reported it yet): conflict flow instead of a save error.
+            // String(e) of an Error adds the "Error: " prefix, so match inside.
+            if (String(e).includes("The file changed on disk:")) {
+              buffer.saveState = "conflict";
+              await this.markConflict(path, "modified", null);
+            } else {
+              buffer.saveState = "error";
+              this.error = `Saving failed: ${e}`;
+            }
+          } else {
+            this.error = `Saving failed: ${e}`;
           }
-          this.error = `Saving failed: ${e}`;
         } finally {
           this.writeJobs.delete(path);
         }
@@ -1197,14 +1292,134 @@ class VaultStore {
 
   private async reloadBuffer(path: string) {
     const buffer = this.buffers[path];
-    if (!buffer || buffer.dirty) return;
+    if (!buffer || buffer.dirty || buffer.conflict) return;
     const revision = buffer.revision;
-    const fresh = await api.readFile(path).catch(() => null);
+    const fresh = await api.readFileMeta(path).catch(() => null);
     const current = this.buffers[path];
-    if (fresh !== null && current === buffer && !current.dirty && current.revision === revision && current.content !== fresh) {
-      current.content = fresh;
-      current.saveState = "saved";
+    if (fresh !== null && current === buffer && !current.dirty && !current.conflict && current.revision === revision) {
+      current.baseModified = fresh.entry.modified;
+      current.baseSize = fresh.entry.size;
+      if (current.content !== fresh.content) {
+        current.content = fresh.content;
+        current.saveState = "saved";
+      }
     }
+  }
+
+  /**
+   * An external change collided with unsaved edits: stop autosave and keep
+   * both versions until the user resolves it (keep mine, take theirs, merge).
+   * For "modified" the current disk text is read; when it matches the buffer
+   * exactly (e.g. a sync tool rewrote the same bytes), the new disk state is
+   * adopted silently instead of bothering the user.
+   */
+  private async markConflict(path: string, kind: "modified" | "removed", entry: VaultEntry | null): Promise<void> {
+    const buffer = this.buffers[path];
+    if (!buffer) return;
+    clearTimeout(this.saveTimers.get(path));
+    this.saveTimers.delete(path);
+    if (kind === "removed") {
+      buffer.conflict = { kind: "removed", diskContent: null, diskEntry: null };
+      return;
+    }
+    const fresh = await api.readFileMeta(path).catch(() => null);
+    const current = this.buffers[path];
+    if (current !== buffer) return;
+    // The file vanished between the event and the read: it was deleted.
+    if (!fresh) return this.markConflict(path, "removed", null);
+    // A save finished while the disk was read: nothing to resolve anymore.
+    if (!buffer.dirty && !buffer.conflict) return this.reloadBuffer(path);
+    if (fresh.content === buffer.content) {
+      buffer.baseModified = fresh.entry.modified;
+      buffer.baseSize = fresh.entry.size;
+      buffer.conflict = null;
+      buffer.dirty = false;
+      buffer.saveState = "saved";
+      this.pruneBuffer(path);
+      return;
+    }
+    // A later external edit refreshes the disk side of an open conflict.
+    buffer.conflict = { kind: "modified", diskContent: fresh.content, diskEntry: fresh.entry ?? entry };
+  }
+
+  /**
+   * Resolves a conflict by writing the local text over the disk version
+   * ("Keep mine"). The write is checked against the disk state the conflict
+   * was detected at, so yet another external edit raises a new conflict.
+   * A file deleted on disk is recreated.
+   */
+  async resolveConflictKeepMine(path: string) {
+    const buffer = this.buffers[path];
+    if (!buffer?.conflict) return;
+    await this.resolveConflictMerged(path, buffer.content);
+  }
+
+  /**
+   * Resolves a conflict by taking the disk version ("Take theirs"): the
+   * buffer shows the disk text, the local edits are deliberately dropped.
+   * For a file deleted on disk the tab is closed and the buffer discarded.
+   */
+  async resolveConflictTakeTheirs(path: string) {
+    const buffer = this.buffers[path];
+    if (!buffer?.conflict) return;
+    const conflict = buffer.conflict;
+    if (conflict.kind === "removed") {
+      this.discardBuffer(path);
+      await this.closeTabs((p) => p === path);
+      return;
+    }
+    buffer.content = conflict.diskContent ?? "";
+    buffer.baseModified = conflict.diskEntry?.modified ?? null;
+    buffer.baseSize = conflict.diskEntry?.size ?? null;
+    buffer.dirty = false;
+    buffer.saveState = "saved";
+    buffer.conflict = null;
+    buffer.revision++;
+    this.pruneBuffer(path);
+  }
+
+  /**
+   * Resolves a conflict with a merged text (from the compare dialog): the
+   * merge becomes the buffer and is saved against the disk state of the
+   * conflict, so a further external edit raises a new conflict instead of
+   * being overwritten.
+   */
+  async resolveConflictMerged(path: string, merged: string) {
+    const buffer = this.buffers[path];
+    if (!buffer?.conflict) return;
+    const conflict = buffer.conflict;
+    buffer.conflict = null;
+    buffer.content = merged;
+    buffer.baseModified = conflict.diskEntry?.modified ?? null;
+    buffer.baseSize = conflict.diskEntry?.size ?? null;
+    buffer.dirty = true;
+    buffer.saveState = "pending";
+    buffer.revision++;
+    await this.flush(path);
+    // "Keep mine" on a deleted file recreated it: the tree gets its entry
+    // back right away, without waiting for the watcher.
+    if (conflict.kind === "removed" && !buffer.dirty && !buffer.conflict && !this.entryAt(path)) {
+      const entry = this.entryFromBuffer(path, buffer);
+      if (entry) {
+        this.insertEntry(entry);
+        this.appliedOwnChange([path], isNote(path));
+        appEvents.emit("file-create", { path, isDir: false });
+      }
+    }
+  }
+
+  /** The disk state of a saved buffer as an entry, for a recreated file. */
+  private entryFromBuffer(path: string, buffer: FileBuffer): VaultEntry | null {
+    if (buffer.baseModified === null || buffer.baseSize === null) return null;
+    const name = path.split("/").pop() ?? path;
+    return {
+      path,
+      name,
+      extension: name.includes(".") ? (name.split(".").pop() ?? "") : "",
+      isDir: false,
+      size: buffer.baseSize,
+      modified: buffer.baseModified,
+    };
   }
 
   /**
@@ -1263,6 +1478,35 @@ class VaultStore {
     }
   }
 
+  /**
+   * Opens `path`, creating it with `content` when it does not exist yet
+   * (daily notes, "new note from template"). Returns the opened path, or null
+   * when something went wrong (then `error` says what). A file that appears
+   * between the check and the create (double click, sync) is opened, not an error.
+   */
+  async openOrCreateFile(path: string, content: string, opts: OpenOptions = {}): Promise<string | null> {
+    const existing = this.entryAt(path);
+    if (existing && !existing.isDir) {
+      await this.openFile(existing.path, opts);
+      return existing.path;
+    }
+    try {
+      await this.flush();
+      const entry = await api.createFile(path, content);
+      this.insertEntry(entry);
+      this.appliedOwnChange([path], isNote(path));
+      appEvents.emit("file-create", { path, isDir: false });
+    } catch (e) {
+      if (!String(e).startsWith("path already exists:")) {
+        this.error = String(e);
+        return null;
+      }
+      // Created between the check and the write: open what is there.
+    }
+    await this.openFile(path, opts);
+    return this.entryAt(path)?.path ?? path;
+  }
+
   async createFolder(parent = "") {
     const prefix = parent ? `${parent}/` : "";
     const taken = new Set(this.entries.map((e) => e.path.toLowerCase()));
@@ -1297,14 +1541,38 @@ class VaultStore {
   }
 
   private async undoMove(from: string, to: string) {
-    const ok = await this.moveTo(from, to, { undo: false });
-    if (!ok && this.error) toasts.error(this.error);
+    // The link-aware undo restores the notes the rename rewrote; a plain
+    // move back is the fallback for a rename that predates the snapshots.
+    const snapshots = this.renameSnapshots.get(to);
+    if (!snapshots) {
+      const ok = await this.moveTo(from, to, { undo: false });
+      if (!ok && this.error) toasts.error(this.error);
+      return;
+    }
+    try {
+      this.renameSnapshots.delete(to);
+      const result = await api.undoRenameWithLinks(from, to, snapshots);
+      // The backend moved the entry back already; take the new paths into
+      // the tree, the tabs and the buffers without moving anything again.
+      this.applyMovedEntry(to, from, result.entry);
+      await this.refresh();
+      if (result.skipped.length) {
+        toasts.error(
+          `${result.skipped.length} note(s) changed since the rename and kept their text.`,
+        );
+      }
+    } catch (e) {
+      toasts.error(String(e));
+    }
   }
+
+  /** The notes `renameWithLinks` rewrote, by their new path, for the undo. */
+  private renameSnapshots = new Map<string, UpdatedLinkFile[]>();
 
   private async moveTo(
     from: string,
     to: string,
-    opts: { undo?: boolean; verb?: "move" | "rename" } = {},
+    opts: { undo?: boolean; verb?: "move" | "rename"; snapshots?: boolean } = {},
   ): Promise<boolean> {
     if (to === from) return true;
     try {
@@ -1314,39 +1582,18 @@ class VaultStore {
         this.error = "Some files could not be saved. Retry saving before moving them.";
         return false;
       }
-      const entry = await api.renameEntry(from, to);
-      const remap = (p: string) => (p === from ? to : p.startsWith(`${from}/`) ? to + p.slice(from.length) : p);
-      // The entries move with the file right away: the tree, the link lookups
-      // and the next name generation see the new paths without the watcher.
-      const movedEntries = this.entries.filter((e) => e.path === from || e.path.startsWith(`${from}/`));
-      const movedPaths = movedEntries.map((e) => e.path);
-      // The entry of the moved path comes back from the command with its real
-      // size and time; everything inside a moved folder keeps its metadata,
-      // only its path changes.
-      this.entries = this.entries.map((e) => {
-        if (e.path === from) return { ...entry, path: to, name: to.split("/").pop()! };
-        if (!e.path.startsWith(`${from}/`)) return e;
-        const path = remap(e.path);
-        return { ...e, path, name: path.split("/").pop()! };
-      });
-      // The moved file was written by us: its watcher echo must not read it
-      // back over the editor.
-      this.noteSelfWrite({ ...entry, path: to });
-      ui.moved(from, to);
-      for (const t of this.tabs) if (t.path) t.path = remap(t.path);
-      const movedBuffers: Record<string, FileBuffer> = {};
-      for (const [path, buffer] of Object.entries(this.buffers)) movedBuffers[remap(path)] = buffer;
-      this.buffers = movedBuffers;
-      for (const [path, buffer] of Object.entries(this.buffers)) if (buffer.dirty) this.scheduleSave(path);
-      this.recent = this.recent.map(remap);
-      this.navHistory = this.navHistory.map((h) => (h.path ? { ...h, path: remap(h.path) } : h));
-      this.saveTabs();
-      if (to.includes("/")) ui.reveal(to);
-      this.appliedOwnChange(
-        [...movedPaths, ...movedPaths.map(remap)],
-        movedEntries.some((e) => e.isDir || isNote(e.path)),
-      );
-      appEvents.emit("file-rename", { from, to, isDir: entry.isDir });
+      const result = await api.renameWithLinks(from, to);
+      const entry = result.entry;
+      if (opts.snapshots !== false && result.updatedFiles.length) {
+        this.renameSnapshots.set(to, result.updatedFiles);
+      }
+      // The backend rewrote other notes on disk. An open, clean buffer of one
+      // of them still holds the old text and would write it back on the next
+      // save, so it is read again; a dirty one cannot be here (checked above).
+      for (const updated of result.updatedFiles) {
+        if (this.buffers[updated.entry.path]) void this.reloadBuffer(updated.entry.path);
+      }
+      this.applyMovedEntry(from, to, entry);
       if (opts.undo !== false) {
         const oldName = from.split("/").pop() ?? from;
         const newName = to.split("/").pop() ?? to;
@@ -1355,13 +1602,52 @@ class VaultStore {
           opts.verb === "rename"
             ? `Renamed "${oldName}" to "${newName}"`
             : `Moved "${oldName}" to ${destFolder ? `"${destFolder}"` : "vault root"}`;
-        toasts.undo(message, () => this.undoMove(to, from));
+        toasts.undo(message, () => this.undoMove(from, to));
       }
       return true;
     } catch (e) {
       this.error = String(e);
       return false;
     }
+  }
+
+  /**
+   * Takes a rename the backend already performed into the client state:
+   * entries, buffers, tabs, history, the tree and the own-change bookkeeping.
+   */
+  private applyMovedEntry(from: string, to: string, entry: VaultEntry) {
+    const remap = (p: string) => (p === from ? to : p.startsWith(`${from}/`) ? to + p.slice(from.length) : p);
+    // The entries move with the file right away: the tree, the link lookups
+    // and the next name generation see the new paths without the watcher.
+    const movedEntries = this.entries.filter((e) => e.path === from || e.path.startsWith(`${from}/`));
+    const movedPaths = movedEntries.map((e) => e.path);
+    // The entry of the moved path comes back from the command with its real
+    // size and time; everything inside a moved folder keeps its metadata,
+    // only its path changes.
+    this.entries = this.entries.map((e) => {
+      if (e.path === from) return { ...entry, path: to, name: to.split("/").pop()! };
+      if (!e.path.startsWith(`${from}/`)) return e;
+      const path = remap(e.path);
+      return { ...e, path, name: path.split("/").pop()! };
+    });
+    // The moved file was written by us: its watcher echo must not read it
+    // back over the editor.
+    this.noteSelfWrite({ ...entry, path: to });
+    ui.moved(from, to);
+    for (const t of this.tabs) if (t.path) t.path = remap(t.path);
+    const movedBuffers: Record<string, FileBuffer> = {};
+    for (const [path, buffer] of Object.entries(this.buffers)) movedBuffers[remap(path)] = buffer;
+    this.buffers = movedBuffers;
+    for (const [path, buffer] of Object.entries(this.buffers)) if (buffer.dirty) this.scheduleSave(path);
+    this.recent = this.recent.map(remap);
+    this.navHistory = this.navHistory.map((h) => (h.path ? { ...h, path: remap(h.path) } : h));
+    this.saveTabs();
+    if (to.includes("/")) ui.reveal(to);
+    this.appliedOwnChange(
+      [...movedPaths, ...movedPaths.map(remap)],
+      movedEntries.some((e) => e.isDir || isNote(e.path)),
+    );
+    appEvents.emit("file-rename", { from, to, isDir: entry.isDir });
   }
 
   async trash(path: string, opts: { undo?: boolean } = {}) {
