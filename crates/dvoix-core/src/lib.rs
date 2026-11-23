@@ -19,7 +19,7 @@ pub use error::{Error, Result};
 pub use index::{GraphData, Index, NoteSummary, SearchHit, TagCount, TaskItem};
 pub use markdown::{ParsedNote, RenderedNote};
 pub use tasks::{Priority, Task};
-pub use vault::{HiddenFilter, TrashedEntry, Vault, VaultEntry};
+pub use vault::{FileRead, HiddenFilter, TrashedEntry, Vault, VaultEntry};
 pub use watcher::{ChangeBatcher, ChangeKind, ChangeSender, VaultChange, VaultWatcher};
 
 /// Name of the hidden folder inside a vault where dvoix keeps caches and settings.

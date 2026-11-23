@@ -2,11 +2,12 @@
   // The open file: the file type's view and footers from features and plugins
   // (backlinks). A tab can also show a plugin view instead. The headers (tab
   // bar) and window buttons sit in the title row above (see `App.svelte`).
-  import { ArrowLeft, ArrowRight, FileText, Search } from "@lucide/svelte";
+  import { ArrowLeft, ArrowRight, FileText, GitCompareArrows, Search, TriangleAlert } from "@lucide/svelte";
   import { fileTypeFor } from "../filetypes";
   import { hotkeyLabel, plugins } from "../plugins";
   import { ui } from "../ui.svelte";
   import { vault, type PaneSide } from "../vault.svelte";
+  import ConflictMergeDialog from "./ConflictMergeDialog.svelte";
   import SaveStatus from "./SaveStatus.svelte";
 
   let { pane = "left" }: { pane?: PaneSide } = $props();
@@ -14,6 +15,12 @@
   const tab = $derived(vault.paneTab(pane));
   const path = $derived(tab?.path ?? null);
   const content = $derived(vault.contentFor(path));
+  const conflict = $derived(vault.conflictFor(path));
+  let comparing = $state(false);
+  // A resolved (or externally healed) conflict closes its compare dialog.
+  $effect(() => {
+    if (!conflict) comparing = false;
+  });
   const focused = $derived(vault.focusedPane === pane);
   const segments = $derived(path ? path.split("/") : []);
   const type = $derived(path ? fileTypeFor(path) : undefined);
@@ -91,6 +98,48 @@
         {/if}
       </div>
     </header>
+    {#if conflict && path}
+      <div class="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning" role="alert">
+        <TriangleAlert size={14} strokeWidth={1.75} class="shrink-0" />
+        <span class="min-w-0 flex-1">
+          {conflict.kind === "removed"
+            ? "This file was deleted on disk while you have unsaved edits. Saving is paused."
+            : "This file changed on disk while you have unsaved edits. Saving is paused."}
+        </span>
+        <div class="flex shrink-0 items-center gap-1.5">
+          <button
+            type="button"
+            class="rounded-md border border-warning/40 px-2 py-0.5 font-medium transition-colors hover:bg-warning/15"
+            title={conflict.kind === "removed" ? "Recreate the file with your edits" : "Overwrite the disk version with your edits"}
+            onclick={() => void vault.resolveConflictKeepMine(path)}
+          >
+            Keep mine
+          </button>
+          <button
+            type="button"
+            class="rounded-md border border-warning/40 px-2 py-0.5 font-medium transition-colors hover:bg-warning/15"
+            title={conflict.kind === "removed" ? "Drop your edits and close the tab" : "Drop your edits and load the disk version"}
+            onclick={() => void vault.resolveConflictTakeTheirs(path)}
+          >
+            {conflict.kind === "removed" ? "Discard & close" : "Take theirs"}
+          </button>
+          {#if conflict.kind === "modified"}
+            <button
+              type="button"
+              class="inline-flex items-center gap-1 rounded-md border border-warning/40 px-2 py-0.5 font-medium transition-colors hover:bg-warning/15"
+              title="Compare both versions and merge them"
+              onclick={() => (comparing = true)}
+            >
+              <GitCompareArrows size={12} strokeWidth={1.75} />
+              Compare
+            </button>
+          {/if}
+        </div>
+      </div>
+      {#if comparing && conflict.kind === "modified"}
+        <ConflictMergeDialog {path} onclose={() => (comparing = false)} />
+      {/if}
+    {/if}
     <div class="min-h-0 flex-1">
       {#key path}
         <type.view

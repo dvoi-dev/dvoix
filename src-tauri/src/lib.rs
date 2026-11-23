@@ -142,6 +142,7 @@ pub fn run() {
             commands::list_entries,
             commands::list_hidden_entries,
             commands::read_file,
+            commands::read_file_meta,
             commands::write_file,
             commands::render_markdown,
             commands::create_file,

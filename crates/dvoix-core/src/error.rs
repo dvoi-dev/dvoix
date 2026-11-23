@@ -16,6 +16,8 @@ pub enum Error {
     AlreadyExists(String),
     #[error("The task changed in the file, please reload: {0}")]
     StaleTask(String),
+    #[error("The file changed on disk: {0}")]
+    Conflict(String),
     #[error("Git error: {0}")]
     Git(String),
     #[error("Plugin error: {0}")]
