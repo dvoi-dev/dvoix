@@ -17,7 +17,7 @@ A desktop app for notes, project management, tracking, and whatever comes later.
 - Quick switcher (Ctrl/Cmd + O) with fuzzy search over all files: `mtg plan` finds `Projects/Meeting-Planning`. Enter opens, Ctrl + Enter opens in a new tab, and if the note does not exist it is created
 - Command palette (Ctrl/Cmd + P): fuzzy search over every registered command, including commands without a shortcut, with the plugin name and the effective shortcut. Unavailable commands are dimmed
 - Find and replace in the open note (Ctrl/Cmd + F / Ctrl/Cmd + H): match case, regular expressions, whole words, replace next or all. In the reading view it switches to the editing view first
-- Keyboard shortcuts: Ctrl + T new tab, Ctrl + W close tab, Ctrl + Tab / Ctrl + Shift + Tab (or Ctrl + Page Down/Up) switch tabs, Ctrl + \ split right, Alt + Left / Alt + Right (or the Back / Forward buttons) navigate history, Ctrl + ] show/hide the right sidebar, Ctrl + Enter commit changes, Ctrl + Shift + H open history, Ctrl + , settings. Every command shortcut can be rebound under Settings → Keyboard shortcuts; conflicts are shown before a binding is replaced
+- Keyboard shortcuts: Ctrl + T new tab, Ctrl + W close tab, Ctrl + Tab / Ctrl + Shift + Tab (or Ctrl + Page Down/Up) switch tabs, Ctrl + \ split right, Alt + Left / Alt + Right (or the Back / Forward buttons) navigate history, Ctrl + ] show/hide the right sidebar, Ctrl + Shift + F full-text search, Ctrl + , settings. Every command shortcut can be rebound under Settings → Keyboard shortcuts; conflicts are shown before a binding is replaced
 - Clickable folder breadcrumbs in the file header reveal the parent folder in the explorer
 - Markdown editor (CodeMirror 6) with YAML frontmatter, `[[wikilinks]]` (Ctrl/Cmd + click opens or creates the note) and `#tags`
 - Floating selection toolbar when selecting text in the Markdown editor (Bold, Italic, Strikethrough, Inline code, Wikilink, Heading, Quote), plus Ctrl/Cmd + B and Ctrl/Cmd + I shortcuts
@@ -40,7 +40,7 @@ A desktop app for notes, project management, tracking, and whatever comes later.
 - Accessibility: dialogs keep the keyboard focus inside and give it back on close, the file tree is fully keyboard-navigable, and animations respect the system's "reduce motion" setting
 - Settings: editor (line length, line numbers, spellcheck), appearance (themes: Dark, Midnight, Slate, Light; preset or custom hex accent colors; editor and interface fonts; font size sliders; CSS snippets from `.dvoix/snippets/`), rebindable keyboard shortcuts with conflict handling, and separate options per feature or plugin
 - All settings of a vault live inside the vault under `.dvoix/` (see below), so they move along when you copy or sync the folder
-- Projects and Git are official plugins in the plugin store: [dvoix-projects](https://github.com/dvoi-dev/dvoix-projects) and [dvoix-git](https://github.com/dvoi-dev/dvoix-git)
+- Official plugins in the plugin store: [dvoix-projects](https://github.com/dvoi-dev/dvoix-projects), [dvoix-git](https://github.com/dvoi-dev/dvoix-git), [dvoix-kanban](https://github.com/dvoi-dev/dvoix-kanban) (`.kboard`) and [dvoix-crew](https://github.com/dvoi-dev/dvoix-crew)
 - First custom file type: `.canvas` in the open [JSON Canvas format](https://jsoncanvas.org) (move cards, double-click creates a card)
 
 ## Tech stack
@@ -219,7 +219,7 @@ npm run tauri build    # build the installer
 
 A local `tauri build` makes plain installers without update bundles, so it needs no signing key. The release workflow adds `src-tauri/tauri.release.conf.json`, which turns on the signed update bundles.
 
-After a pull that brings new dependencies, run `npm install` once. `npm run dev`, `npm run check` and `npm run build` check first whether all packages from `package.json` are installed, and say what is missing – instead of failing later in Vite with "Failed to resolve import …".
+After a pull that brings new dependencies, run `npm install` once. `npm run dev`, `npm run check`, `npm run build` and `npm run test` first check that your Node.js version matches `engines.node` in `package.json` (see `.nvmrc`) and that all packages are installed, and say what is wrong – instead of failing later in Vite with "Failed to resolve import …".
 
 To check:
 
@@ -250,7 +250,7 @@ Renovate (`renovate.json`) keeps npm, Cargo and GitHub Actions dependencies up t
 
 ## Next steps (ideas)
 
-- Kanban board (`.board`) and tracking (`.track`) as official plugins in the store
+- Tracking (`.track`) as an official plugin in the store
 - `tantivy` instead of FTS5, if search needs to do more
 
 ## License
