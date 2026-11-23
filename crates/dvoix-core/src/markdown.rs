@@ -262,11 +262,11 @@ pub fn extract_section<'a>(body: &'a str, heading: &str) -> Option<&'a str> {
                     text.push_str(&t);
                 }
             }
-            Event::End(TagEnd::Heading(_)) => {
-                if start.is_none() && text.trim().to_lowercase() == wanted {
-                    // The section starts at the heading itself, like Obsidian.
-                    start = Some((section_start(body, &range), level));
-                }
+            Event::End(TagEnd::Heading(_))
+                if start.is_none() && text.trim().to_lowercase() == wanted =>
+            {
+                // The section starts at the heading itself, like Obsidian.
+                start = Some((section_start(body, &range), level));
             }
             _ => {}
         }

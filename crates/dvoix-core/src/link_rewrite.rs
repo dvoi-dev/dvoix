@@ -74,9 +74,7 @@ fn resolve_rel(from_dir: &str, rel: &str) -> Option<String> {
         match part {
             "" | "." => {}
             ".." => {
-                if stack.pop().is_none() {
-                    return None;
-                }
+                stack.pop()?;
             }
             p => stack.push(p),
         }
@@ -401,10 +399,10 @@ impl LinkRewriter {
         if t.contains('/') {
             // A path-like target keeps its form: the full new path, '.md'
             // only when the old text had it.
-            if !tl.ends_with(".md") {
-                if let Some(no_ext) = new_path.strip_suffix(".md") {
-                    return no_ext.to_string();
-                }
+            if !tl.ends_with(".md")
+                && let Some(no_ext) = new_path.strip_suffix(".md")
+            {
+                return no_ext.to_string();
             }
             return new_path.to_string();
         }
@@ -535,10 +533,11 @@ impl LinkRewriter {
             let trimmed = raw.trim();
             let ts = inner_s + (raw.len() - raw.trim_start().len());
             let te = ts + trimmed.len();
-            if !trimmed.is_empty() && !overlaps(&skips, ts, te) {
-                if let Some(nt) = self.wiki_replace(trimmed) {
-                    spans.push((ts, te, nt));
-                }
+            if !trimmed.is_empty()
+                && !overlaps(&skips, ts, te)
+                && let Some(nt) = self.wiki_replace(trimmed)
+            {
+                spans.push((ts, te, nt));
             }
             p = close + 2;
         }
@@ -578,10 +577,10 @@ impl LinkRewriter {
                 match content[ds + 1..].find('>') {
                     Some(g) if !content[ds + 1..ds + 1 + g].contains('\n') => {
                         let gt = ds + 1 + g;
-                        if !overlaps(&skips, ds, gt + 1) {
-                            if let Some(nd) = self.md_replace(source, &content[ds + 1..gt]) {
-                                spans.push((ds + 1, gt, nd));
-                            }
+                        if !overlaps(&skips, ds, gt + 1)
+                            && let Some(nd) = self.md_replace(source, &content[ds + 1..gt])
+                        {
+                            spans.push((ds + 1, gt, nd));
                         }
                         i = gt + 1;
                         continue;
@@ -625,10 +624,11 @@ impl LinkRewriter {
                 .unwrap_or("")
                 .to_string();
             let de = ds + dest.len();
-            if !dest.is_empty() && !overlaps(&skips, ds, de) {
-                if let Some(nd) = self.md_replace(source, &dest) {
-                    spans.push((ds, de, nd));
-                }
+            if !dest.is_empty()
+                && !overlaps(&skips, ds, de)
+                && let Some(nd) = self.md_replace(source, &dest)
+            {
+                spans.push((ds, de, nd));
             }
             i = k + 1;
         }
