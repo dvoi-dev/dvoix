@@ -20,6 +20,9 @@ pub struct ParsedNote {
     pub title: String,
     /// Tags from frontmatter `tags:` plus inline `#tags`, lower-cased and de-duplicated.
     pub tags: Vec<String>,
+    /// Aliases from frontmatter `aliases:` (or the singular `alias:`), as
+    /// written; alternative names a wikilink can use for this note.
+    pub aliases: Vec<String>,
     /// Link targets: `[[wikilinks]]` (without alias/heading) and relative markdown links.
     pub links: Vec<String>,
     pub headings: Vec<Heading>,
@@ -85,6 +88,7 @@ pub fn parse(content: &str, file_stem: &str) -> ParsedNote {
             .collect(),
         _ => Vec::new(),
     };
+    note.aliases = extract_aliases(&note.frontmatter);
     let mut links = Vec::new();
 
     let mut text = String::new();
@@ -192,6 +196,26 @@ pub struct RenderedNote {
 /// Renders a note for the reading view: the body as HTML and the frontmatter
 /// as JSON.
 pub fn render(content: &str) -> RenderedNote {
+    render_full(content)
+}
+
+/// Renders a note, or only the section under `heading` (`![[note#heading]]`).
+/// `None` when the note has no such heading; without a heading this is
+/// `render`. The section keeps its own heading and ends before the next
+/// heading of the same or a higher level, like Obsidian's transclusions.
+pub fn render_section(content: &str, heading: Option<&str>) -> Option<RenderedNote> {
+    let Some(heading) = heading else {
+        return Some(render_full(content));
+    };
+    let (_, body) = split_frontmatter(content);
+    let section = extract_section(body, heading)?;
+    Some(RenderedNote {
+        html: render_body(section),
+        frontmatter: Value::Object(Default::default()),
+    })
+}
+
+fn render_full(content: &str) -> RenderedNote {
     let (yaml, body) = split_frontmatter(content);
     let mut frontmatter = Value::Object(Default::default());
     if let Some(yaml) = yaml
@@ -203,6 +227,65 @@ pub fn render(content: &str) -> RenderedNote {
     RenderedNote {
         html: render_body(body),
         frontmatter,
+    }
+}
+
+/// The slice of `body` from the first heading equal to `heading` (its plain
+/// text, case-insensitive) up to the next heading of the same or a higher
+/// level, or the end. Headings inside code blocks do not count: the parser
+/// knows what is code. `None` when no heading matches.
+pub fn extract_section<'a>(body: &'a str, heading: &str) -> Option<&'a str> {
+    let wanted = heading.trim().to_lowercase();
+    if wanted.is_empty() {
+        return None;
+    }
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
+    let mut start: Option<(usize, u8)> = None;
+    let mut text = String::new();
+    let mut level = 0u8;
+    for (event, range) in Parser::new_ext(body, options).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Heading { level: l, .. }) => {
+                let l = heading_level(l);
+                if let Some((start_at, matched_level)) = start {
+                    if l <= matched_level {
+                        return Some(&body[start_at..range.start]);
+                    }
+                } else {
+                    level = l;
+                    text.clear();
+                }
+            }
+            Event::Text(t) | Event::Code(t) => {
+                if start.is_none() {
+                    text.push_str(&t);
+                }
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if start.is_none() && text.trim().to_lowercase() == wanted {
+                    // The section starts at the heading itself, like Obsidian.
+                    start = Some((section_start(body, &range), level));
+                }
+            }
+            _ => {}
+        }
+    }
+    start.map(|(start_at, _)| &body[start_at..])
+}
+
+/// Where a heading really starts: `into_offset_iter` reports setext headings
+/// from their underline, so the text line above belongs to the section too.
+fn section_start(body: &str, range: &std::ops::Range<usize>) -> usize {
+    let before = &body[..range.start];
+    let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line = body[line_start..range.start].trim_end_matches(['\r', '\n']);
+    let setext = !line.is_empty()
+        && (line.bytes().all(|b| b == b'=') || line.bytes().all(|b| b == b'-'));
+    if setext {
+        before[..line_start].rfind('\n').map(|i| i + 1).unwrap_or(0)
+    } else {
+        range.start
     }
 }
 
@@ -292,18 +375,26 @@ fn wikilink_html(inner: &str, embed: bool) -> String {
         Some((target, alias)) => (target, Some(alias)),
         None => (inner, None),
     };
-    // A heading or block reference belongs to the target, not to the name.
-    let target = target.split('#').next().unwrap_or("").trim();
+    // A heading belongs to the target: `![[note#section]]` embeds only that
+    // section, so the reading view gets it in `data-embed-heading`.
+    let (note_target, heading) = match target.split_once('#') {
+        Some((note, heading)) => (note.trim(), Some(heading.trim())),
+        None => (target.trim(), None),
+    };
     let label = match alias {
         Some(alias) if !alias.trim().is_empty() => alias.trim(),
-        _ => target,
+        _ => note_target,
     };
-    let target = escape_html(target);
+    let target = escape_html(note_target);
     let label = escape_html(label);
     if embed {
         // In `![[image.png|300]]` the part after the pipe is the width.
+        let heading_attr = match heading {
+            Some(h) if !h.is_empty() => format!(" data-embed-heading=\"{}\"", escape_html(h)),
+            _ => String::new(),
+        };
         format!(
-            "<a class=\"wikilink embed\" href=\"#\" data-wikilink=\"{target}\" data-embed=\"{target}\">{label}</a>"
+            "<a class=\"wikilink embed\" href=\"#\" data-wikilink=\"{target}\" data-embed=\"{target}\"{heading_attr}>{label}</a>"
         )
     } else {
         format!("<a class=\"wikilink\" href=\"#\" data-wikilink=\"{target}\">{label}</a>")
@@ -332,6 +423,37 @@ fn heading_level(level: HeadingLevel) -> u8 {
 
 fn normalize_tag(tag: &str) -> String {
     tag.trim().trim_start_matches('#').to_lowercase()
+}
+
+/// The aliases of a note from its frontmatter: `aliases` as a YAML list or a
+/// string (a single alias, or several separated by commas), plus the singular
+/// `alias` some vaults use. Trimmed, empty ones dropped, de-duplicated
+/// case-insensitively with the first spelling kept.
+fn extract_aliases(frontmatter: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |raw: &str| {
+        let alias = raw.trim();
+        if !alias.is_empty() && seen.insert(alias.to_lowercase()) {
+            out.push(alias.to_string());
+        }
+    };
+    for key in ["aliases", "alias"] {
+        match frontmatter.get(key) {
+            Some(Value::Array(items)) => {
+                for item in items.iter().filter_map(|v| v.as_str()) {
+                    push(item);
+                }
+            }
+            Some(Value::String(s)) => {
+                for part in s.split(',') {
+                    push(part);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn dedup(items: &mut Vec<String>) {
@@ -441,6 +563,33 @@ mod tests {
         assert_eq!(parse("Only text", "file").title, "file");
     }
 
+    /// Aliases come as a YAML list, a single string or a comma-separated
+    /// string; the singular `alias` is accepted too. Empty and repeated
+    /// entries go, the first spelling stays.
+    #[test]
+    fn parses_aliases_from_frontmatter() {
+        let n = parse(
+            "---\naliases: [Meeting Notes, mtg, \" \", MTG]\n---\nbody",
+            "file",
+        );
+        assert_eq!(n.aliases, ["Meeting Notes", "mtg"]);
+
+        let n = parse("---\naliases: Weekly Sync\n---\nbody", "file");
+        assert_eq!(n.aliases, ["Weekly Sync"]);
+
+        let n = parse("---\naliases: One, Two ,, One\n---\nbody", "file");
+        assert_eq!(n.aliases, ["One", "Two"]);
+
+        let n = parse("---\nalias: Legacy Name\n---\nbody", "file");
+        assert_eq!(n.aliases, ["Legacy Name"]);
+
+        let n = parse("---\naliases: [Same]\nalias: same, Other\n---\nbody", "file");
+        assert_eq!(n.aliases, ["Same", "Other"]);
+
+        assert!(parse("# No frontmatter", "file").aliases.is_empty());
+        assert!(parse("---\naliases: 42\n---\nbody", "file").aliases.is_empty());
+    }
+
     #[test]
     fn scans_tags_and_wikilinks_in_plain_text() {
         let mut tags = Vec::new();
@@ -539,6 +688,68 @@ mod tests {
         let html = render_body("[[Beta#goals]]");
         assert!(html.contains(r#"data-wikilink="Beta""#));
         assert!(!html.contains("goals"));
+    }
+
+    /// A section embed carries its heading in `data-embed-heading`; plain
+    /// note and image embeds stay exactly as they were.
+    #[test]
+    fn embeds_keep_their_heading_for_the_reading_view() {
+        let html = render_body("![[Beta#Goals]] and ![[Beta]] and ![[img.png|300]]");
+        assert!(html.contains(
+            r#"data-wikilink="Beta" data-embed="Beta" data-embed-heading="Goals">Beta</a>"#
+        ));
+        assert!(html.contains(r#"data-embed="Beta">Beta</a>"#));
+        assert!(html.contains(r#"data-embed="img.png">300</a>"#));
+        // The heading is escaped like every attribute.
+        let html = render_body("![[Beta#A \"quoted\" & more]]");
+        assert!(html.contains(r#"data-embed-heading="A &quot;quoted&quot; &amp; more""#));
+    }
+
+    /// A section runs from its own heading to the next heading of the same
+    /// or a higher level; deeper headings stay inside.
+    #[test]
+    fn extracts_a_section_with_its_subheadings() {
+        let body = "# Top\n\nintro\n\n## Goals\n\nwant\n\n### Detail\n\nmore\n\n## Other\n\nout\n";
+        assert_eq!(
+            extract_section(body, "goals"),
+            Some("## Goals\n\nwant\n\n### Detail\n\nmore\n\n")
+        );
+        // A level-1 section holds its subsections: it runs to the next
+        // level-1 heading or, here, to the end of the note.
+        assert_eq!(extract_section(body, "Top"), Some(body));
+        // The last section runs to the end of the note.
+        assert_eq!(extract_section(body, "Other"), Some("## Other\n\nout\n"));
+    }
+
+    #[test]
+    fn extracts_setext_sections_and_the_first_of_repeated_headings() {
+        // A setext heading with `-` is level 2; the next `##` ends its section.
+        let body = "Goals\n-----\n\nfirst\n\n## Goals\n\nsecond\n";
+        assert_eq!(extract_section(body, "Goals"), Some("Goals\n-----\n\nfirst\n\n"));
+        let body = "## Notes\n\nfirst\n\n## Notes\n\nsecond\n";
+        assert_eq!(extract_section(body, "Notes"), Some("## Notes\n\nfirst\n\n"));
+    }
+
+    #[test]
+    fn headings_in_code_blocks_are_not_sections() {
+        let body = "```md\n## Goals\n```\n\ntext\n";
+        assert_eq!(extract_section(body, "Goals"), None);
+        assert_eq!(extract_section("plain text", "Goals"), None);
+        assert_eq!(extract_section("# Goals", ""), None);
+    }
+
+    /// `render_section` drops the frontmatter, renders only the section and
+    /// says `None` when the heading is missing; without a heading it is `render`.
+    #[test]
+    fn renders_only_the_wanted_section() {
+        let content = "---\ntags: [x]\n---\n# Note\n\n## Goals\n\n- want\n\n## Other\n\nout\n";
+        let section = render_section(content, Some("Goals")).unwrap();
+        assert!(section.html.contains("<h2>Goals</h2>"));
+        assert!(section.html.contains("<li>want</li>"));
+        assert!(!section.html.contains("Other"));
+        assert!(!section.html.contains("tags"));
+        assert!(render_section(content, Some("Missing")).is_none());
+        assert_eq!(render_section(content, None), Some(render(content)));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 // App state for the open vault and the open file, shared by all components.
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { untrack } from "svelte";
-import { api, onVaultChanged, type VaultChange, type VaultEntry, type VaultInfo } from "./api";
+import { api, onVaultChanged, type NoteAliases, type VaultChange, type VaultEntry, type VaultInfo } from "./api";
 import { appEvents } from "./events";
 import { creatableFileTypes, type FileType } from "./filetypes";
 import { flushConfig } from "./config";
@@ -139,6 +139,11 @@ class VaultStore {
     return path ? (this.buffers[path]?.content ?? "") : "";
   }
 
+  /** The in-memory text of a buffered note, or undefined when it is not open. */
+  bufferedContent(path: string): string | undefined {
+    return this.buffers[path]?.content;
+  }
+
   saveStateFor(path: string | null): SaveState {
     return path ? (this.buffers[path]?.saveState ?? "saved") : "saved";
   }
@@ -183,12 +188,53 @@ class VaultStore {
     return map;
   });
 
-  /** The files of the vault by their name, for the lookups of links. */
-  private fileByName = $derived.by(() => {
-    const map = new Map<string, VaultEntry>();
-    for (const entry of this.entries) if (!entry.isDir && !map.has(entry.name.toLowerCase())) map.set(entry.name.toLowerCase(), entry);
+  /** The files of the vault by their name, for the lookups of links. All
+   * candidates per name: an ambiguous `[[name]]` is answered by path proximity. */
+  private filesByName = $derived.by(() => {
+    const map = new Map<string, VaultEntry[]>();
+    for (const entry of this.entries) {
+      if (entry.isDir) continue;
+      const key = entry.name.toLowerCase();
+      const list = map.get(key);
+      if (list) list.push(entry);
+      else map.set(key, [entry]);
+    }
     return map;
   });
+
+  /** Frontmatter aliases per note, read from the index (a cache over the files). */
+  private aliasRows = $state<NoteAliases[]>([]);
+  /** Moves when the alias cache changes, so suggestion caches know they are stale. */
+  aliasesVersion = $state(0);
+  private aliasTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** The aliases of a note by its path (lower-cased), as written. */
+  private aliasesByPath = $derived.by(() => {
+    const map = new Map<string, string[]>();
+    for (const row of this.aliasRows) map.set(row.path.toLowerCase(), row.aliases);
+    return map;
+  });
+
+  /** The notes that own an alias (lower-cased), for `[[Alias]]` resolution. */
+  private entriesByAlias = $derived.by(() => {
+    const map = new Map<string, VaultEntry[]>();
+    for (const row of this.aliasRows) {
+      const entry = this.fileByPath.get(row.path.toLowerCase());
+      if (!entry) continue;
+      for (const alias of row.aliases) {
+        const key = alias.toLowerCase();
+        const list = map.get(key);
+        if (list) list.push(entry);
+        else map.set(key, [entry]);
+      }
+    }
+    return map;
+  });
+
+  /** The frontmatter aliases of a note, as written; empty when it has none. */
+  aliasesFor(path: string): string[] {
+    return this.aliasesByPath.get(path.toLowerCase()) ?? [];
+  }
 
   /** Called with the paths of every batch of changes, for store plugins (`dvoix.vault.onChange`). */
   private changeListeners = new Set<(paths: string[], changes: VaultChangeKind[]) => void>();
@@ -298,6 +344,9 @@ class VaultStore {
     settings.reset();
     this.info = null;
     this.entries = [];
+    this.aliasRows = [];
+    this.aliasesVersion++;
+    clearTimeout(this.aliasTimer);
     this.entriesVersion++;
     this.trashVersion++;
     this.tabs = [];
@@ -315,10 +364,34 @@ class VaultStore {
   }
 
   async refresh(changed: string[] = []) {
-    this.entries = await api.listEntries();
+    const [entries, aliasRows] = await Promise.all([api.listEntries(), api.aliases()]);
+    this.entries = entries;
+    this.aliasRows = aliasRows;
+    this.aliasesVersion++;
     this.entriesVersion++;
     // The list of the vault was replaced, so the tree of the vault changed.
     this.note(this.changes.structure, changed);
+  }
+
+  /**
+   * Reads the aliases again shortly after notes changed: their frontmatter
+   * (and with it their aliases) can change on every save, but the entry list
+   * does not, so this is lighter than a full refresh.
+   */
+  private scheduleAliasRefresh() {
+    clearTimeout(this.aliasTimer);
+    const navigation = this.navigationId;
+    this.aliasTimer = setTimeout(() => {
+      void api
+        .aliases()
+        .then((rows) => {
+          if (this.navigationId === navigation && this.info) {
+            this.aliasRows = rows;
+            this.aliasesVersion++;
+          }
+        })
+        .catch(() => undefined);
+    }, 150);
   }
 
   /**
@@ -413,7 +486,10 @@ class VaultStore {
     // see the new version.
     if (patched) this.entriesVersion++;
     this.note(this.changes.files, changes.map((c) => c.path));
-    if (notePaths.length) this.note(this.changes.notes, notePaths);
+    if (notePaths.length) {
+      this.note(this.changes.notes, notePaths);
+      this.scheduleAliasRefresh();
+    }
     if (listAgain) this.scheduleRefresh(lastAdded);
     const paths = [...new Set(changes.map((c) => c.path))];
     const kinds = changes.map((c) => ({ path: c.path, kind: c.kind }));
@@ -989,13 +1065,37 @@ class VaultStore {
     await this.createFileAt(name, `# ${target.split("/").pop()}\n\n`, opts);
   }
 
-  resolveLink(target: string): string | undefined {
-    // The path of the file, then its name. The maps are built once per change
-    // of the list of the vault, so this is a lookup and not a walk.
+  resolveLink(target: string, fromPath: string | null = this.openPath): string | undefined {
+    // Exact path, path without `.md`, file name, then frontmatter alias. When
+    // several files share a name or alias, the one closest to `fromPath` wins
+    // (most shared parent folders, then path order). The maps are built once
+    // per change of the list, so this is a lookup and not a walk.
     const t = target.toLowerCase();
     const exact = this.fileByPath.get(t) ?? this.fileByPath.get(`${t}.md`);
     if (exact) return exact.path;
-    return (this.fileByName.get(t) ?? this.fileByName.get(`${t}.md`))?.path;
+    const byName = this.filesByName.get(t) ?? this.filesByName.get(`${t}.md`);
+    if (byName?.length) return this.closestTo(byName, fromPath).path;
+    const byAlias = this.entriesByAlias.get(t);
+    if (byAlias?.length) return this.closestTo(byAlias, fromPath).path;
+    return undefined;
+  }
+
+  /** The candidate with the most parent folders shared with `fromPath`; ties go to path order. */
+  private closestTo(candidates: VaultEntry[], fromPath: string | null): VaultEntry {
+    const from = (fromPath ?? "").toLowerCase().split("/");
+    let best = candidates[0];
+    let bestShared = -1;
+    for (const candidate of candidates) {
+      const parts = candidate.path.toLowerCase().split("/");
+      let shared = 0;
+      while (shared < from.length - 1 && shared < parts.length - 1 && from[shared] === parts[shared]) shared++;
+      const key = candidate.path.toLowerCase();
+      if (shared > bestShared || (shared === bestShared && key < best.path.toLowerCase())) {
+        best = candidate;
+        bestShared = shared;
+      }
+    }
+    return best;
   }
 
   /** The entry of a vault path, as a lookup instead of a walk over the list. */

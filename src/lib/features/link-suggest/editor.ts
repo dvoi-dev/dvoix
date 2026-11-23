@@ -27,6 +27,8 @@ interface Target {
   /** What goes between the brackets. */
   link: string;
   isNote: boolean;
+  /** Frontmatter aliases, as written; offered as `[[target|alias]]`. */
+  aliases: string[];
 }
 
 /** The name of a file, without its folder. */
@@ -40,14 +42,15 @@ function nameOf(path: string, isNote: boolean): string {
  * The targets of the vault, built once per change of the list of the vault.
  * Building them for every suggestion walks over all the files of the vault.
  */
-let targets: { version: number; recent: string[]; map: Map<string, Target> } | null = null;
+let targets: { version: number; aliasVersion: number; recent: string[]; map: Map<string, Target> } | null = null;
 
 /** The files a wikilink can point to, in the order they are offered. */
 function linkTargets(): Map<string, Target> {
   const version = vault.entriesVersion;
+  const aliasVersion = vault.aliasesVersion;
   const recent = vault.recent;
-  if (!targets || targets.version !== version || targets.recent !== recent) {
-    targets = { version, recent, map: buildTargets(vault.entries, recent) };
+  if (!targets || targets.version !== version || targets.aliasVersion !== aliasVersion || targets.recent !== recent) {
+    targets = { version, aliasVersion, recent, map: buildTargets(vault.entries, recent) };
   }
   return targets.map;
 }
@@ -55,7 +58,7 @@ function linkTargets(): Map<string, Target> {
 /**
  * What goes between the brackets: the bare name, like in Obsidian, unless
  * another file has the same name. Then the path makes it unique, because
- * `vault.resolveLink` takes the first file with a matching name.
+ * `vault.resolveLink` picks between same-named files by path proximity.
  */
 function buildTargets(entries: VaultEntry[], recent: string[]): Map<string, Target> {
   const count = new Map<string, number>();
@@ -67,7 +70,13 @@ function buildTargets(entries: VaultEntry[], recent: string[]): Map<string, Targ
     const name = nameOf(entry.path, isNote);
     const key = name.toLowerCase();
     count.set(key, (count.get(key) ?? 0) + 1);
-    items.push({ target: { path: entry.path, label, link: "", isNote }, name, key, rank: 0, modified: entry.modified });
+    items.push({
+      target: { path: entry.path, label, link: "", isNote, aliases: vault.aliasesFor(entry.path) },
+      name,
+      key,
+      rank: 0,
+      modified: entry.modified,
+    });
   }
   const rank = new Map(recent.map((p, i) => [p, i]));
   // The rank is put into the item, so the sort does not look it up again for
@@ -96,18 +105,20 @@ function wikilinkCompletions(context: CompletionContext): CompletionResult | nul
   const closed = context.state.sliceDoc(context.pos, context.pos + 2) === "]]";
 
   const scored: { option: Completion; score: number }[] = [];
-  for (const item of linkTargets().values()) {
-    const match = fuzzyMatch(query, item.label);
-    if (!match) continue;
+  const offer = (item: Target, score: number, alias?: string) => {
     const slash = item.label.lastIndexOf("/");
+    const name = slash >= 0 ? item.label.slice(slash + 1) : item.label;
     scored.push({
-      score: match.score,
+      score,
       option: {
-        label: slash >= 0 ? item.label.slice(slash + 1) : item.label,
-        detail: slash >= 0 ? item.label.slice(0, slash) : undefined,
+        label: alias ?? name,
+        detail: alias ? `alias of ${item.label}` : slash >= 0 ? item.label.slice(0, slash) : undefined,
         type: item.isNote ? "text" : "file",
         apply: (view: EditorView, _c: Completion, start: number, end: number) => {
-          const insert = `${item.link}]]`;
+          // An alias is inserted as `[[target|alias]]` (the Obsidian way): the
+          // link keeps pointing at the note even when another alias appears,
+          // and a rename updates the target part before the `|`.
+          const insert = `${alias ? `${item.link}|${alias}` : item.link}]]`;
           view.dispatch({
             changes: { from: start, to: closed ? end + 2 : end, insert },
             selection: { anchor: start + insert.length },
@@ -115,6 +126,19 @@ function wikilinkCompletions(context: CompletionContext): CompletionResult | nul
         },
       },
     });
+  };
+  for (const item of linkTargets().values()) {
+    const match = fuzzyMatch(query, item.label);
+    if (match) offer(item, match.score);
+    // Aliases are offered too; the best hit (path or alias) ranks the note.
+    let best: { alias: string; score: number } | undefined;
+    if (query) {
+      for (const alias of item.aliases) {
+        const am = fuzzyMatch(query, alias);
+        if (am && (!best || am.score > best.score)) best = { alias, score: am.score };
+      }
+    }
+    if (best && (!match || best.score > match.score)) offer(item, best.score, best.alias);
   }
   if (query) scored.sort((a, b) => b.score - a.score);
   // Each entry keeps its order: CodeMirror would otherwise sort by its own score.

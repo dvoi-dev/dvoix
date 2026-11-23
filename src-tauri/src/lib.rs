@@ -160,6 +160,7 @@ pub fn run() {
             commands::notes_with_tag,
             commands::notes_where,
             commands::backlinks,
+            commands::aliases,
             commands::graph,
             commands::graph_notes,
             commands::tasks,

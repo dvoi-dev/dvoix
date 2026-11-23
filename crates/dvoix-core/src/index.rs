@@ -19,7 +19,7 @@ use crate::vault::{Vault, VaultEntry};
 use crate::watcher::{ChangeKind, VaultChange};
 
 /// Bump this when the schema changes; an outdated index is rebuilt.
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// How the search table is built. `prefix='1'` keeps an extra index over the
 /// first letter of every word. The search of the app matches every word as a
@@ -68,6 +68,8 @@ const SECONDARY_INDEXES: &str = "
     CREATE INDEX IF NOT EXISTS tags_nocase ON tags(path COLLATE NOCASE);
     CREATE INDEX IF NOT EXISTS links_target ON links(target);
     CREATE INDEX IF NOT EXISTS links_nocase ON links(source COLLATE NOCASE);
+    CREATE INDEX IF NOT EXISTS aliases_alias ON aliases(alias_lower);
+    CREATE INDEX IF NOT EXISTS aliases_path ON aliases(path);
     CREATE INDEX IF NOT EXISTS tasks_path ON tasks(path);
     CREATE INDEX IF NOT EXISTS tasks_nocase ON tasks(path COLLATE NOCASE);";
 
@@ -78,6 +80,8 @@ const DROP_SECONDARY_INDEXES: &str = "
     DROP INDEX IF EXISTS tags_nocase;
     DROP INDEX IF EXISTS links_target;
     DROP INDEX IF EXISTS links_nocase;
+    DROP INDEX IF EXISTS aliases_alias;
+    DROP INDEX IF EXISTS aliases_path;
     DROP INDEX IF EXISTS tasks_path;
     DROP INDEX IF EXISTS tasks_nocase;";
 
@@ -122,6 +126,16 @@ pub struct GraphNote {
     pub path: String,
     pub title: String,
     pub tags: Vec<String>,
+    /// Frontmatter aliases, as written; the graph resolves `[[Alias]]` links with them.
+    pub aliases: Vec<String>,
+}
+
+/// The aliases of one note, for the link lookups of the app.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteAliases {
+    pub path: String,
+    pub aliases: Vec<String>,
 }
 
 /// A link as written in a note. `target` is the raw (lower-cased) link text;
@@ -194,6 +208,7 @@ impl Index {
                 "DROP TABLE IF EXISTS notes;
                  DROP TABLE IF EXISTS tags;
                  DROP TABLE IF EXISTS links;
+                 DROP TABLE IF EXISTS aliases;
                  DROP TABLE IF EXISTS notes_fts;
                  DROP TABLE IF EXISTS tasks;",
             )?;
@@ -229,6 +244,14 @@ impl Index {
              -- UNIQUE index makes the graph's DISTINCT + ORDER BY a plain
              -- index scan and covers lookups by source as a prefix.
              CREATE UNIQUE INDEX IF NOT EXISTS links_source_target ON links(source, target);
+             -- Frontmatter aliases: alternative names a wikilink can use for
+             -- a note. `alias_lower` is lower-cased in Rust (SQLite's LOWER
+             -- only knows ASCII, an alias like 'Café' must match too).
+             CREATE TABLE IF NOT EXISTS aliases (
+                 path TEXT NOT NULL,
+                 alias TEXT NOT NULL,
+                 alias_lower TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS tasks (
                  path TEXT NOT NULL,
                  line INTEGER NOT NULL,
@@ -258,7 +281,7 @@ impl Index {
         // about to be dropped and rebuilt.
         self.conn.flush_prepared_statement_cache();
         let tx = self.conn.transaction()?;
-        tx.execute_batch("DELETE FROM notes; DELETE FROM tags; DELETE FROM links; DELETE FROM notes_fts; DELETE FROM tasks;")?;
+        tx.execute_batch("DELETE FROM notes; DELETE FROM tags; DELETE FROM links; DELETE FROM aliases; DELETE FROM notes_fts; DELETE FROM tasks;")?;
         // The secondary indexes are built once over the finished tables
         // instead of being maintained for every inserted row. A failure
         // rolls back to the old content with its indexes.
@@ -428,15 +451,17 @@ impl Index {
         let mut note_path = tx.prepare("UPDATE notes SET path = ?1 WHERE rowid = ?2")?;
         let mut tag_path = tx.prepare("UPDATE tags SET path = ?1 WHERE path = ?2")?;
         let mut link_source = tx.prepare("UPDATE links SET source = ?1 WHERE source = ?2")?;
+        let mut alias_path = tx.prepare("UPDATE aliases SET path = ?1 WHERE path = ?2")?;
         let mut task_path = tx.prepare("UPDATE tasks SET path = ?1 WHERE path = ?2")?;
         for (rowid, path) in &moved {
             let new_path = format!("{to}{}", &path[from.len()..]);
             note_path.execute(params![new_path, rowid])?;
             tag_path.execute(params![new_path, path])?;
             link_source.execute(params![new_path, path])?;
+            alias_path.execute(params![new_path, path])?;
             task_path.execute(params![new_path, path])?;
         }
-        drop((note_path, tag_path, link_source, task_path));
+        drop((note_path, tag_path, link_source, alias_path, task_path));
         // The source may have had no rows at all: a hidden folder (`.drafts`
         // -> `drafts`) was never indexed, so there is nothing to rewrite.
         // Reading the destination directly brings its notes in even when no
@@ -696,20 +721,134 @@ impl Index {
         )
     }
 
-    /// Notes that link to `rel`, either by path (`folder/note.md`) or by
-    /// wikilink name (`note`), case-insensitive like Obsidian resolves them.
+    /// Notes that link to `rel`, either by path (`folder/note.md`), by
+    /// wikilink name (`note`) or by one of its frontmatter aliases,
+    /// case-insensitive like Obsidian resolves them.
     pub fn backlinks(&self, rel: &str) -> Result<Vec<NoteSummary>> {
         let full = rel.to_lowercase();
         let name = stem(&full).to_string();
         let without_ext = full.strip_suffix(".md").unwrap_or(&full).to_string();
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT n.path, n.title, n.frontmatter FROM notes n JOIN links l ON l.source = n.path
-             WHERE l.target IN (?1, ?2, ?3) AND n.path != ?4 ORDER BY n.title",
+             WHERE (l.target IN (?1, ?2, ?3)
+                    OR l.target IN (SELECT alias_lower FROM aliases WHERE path = ?4))
+               AND n.path != ?4 ORDER BY n.title",
         )?;
         let notes = stmt
             .query_map(params![full, without_ext, name, rel], row_to_summary)?
             .collect::<std::result::Result<_, _>>()?;
         Ok(notes)
+    }
+
+    /// The aliases of every note that has them, in path order. The app keeps
+    /// this as a lookup for link resolution and the suggestions; like the
+    /// rest of the index it is only a cache over the frontmatter.
+    pub fn all_aliases(&self) -> Result<Vec<NoteAliases>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, alias FROM aliases ORDER BY path, rowid")?;
+        let mut out: Vec<NoteAliases> = Vec::new();
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (path, alias) = row?;
+            match out.last_mut() {
+                Some(last) if last.path == path => last.aliases.push(alias),
+                _ => out.push(NoteAliases {
+                    path,
+                    aliases: vec![alias],
+                }),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Which notes own this alias (lower-cased) is answered by
+    /// `aliases_by_lower`; the link rewriting of a rename needs the whole
+    /// map at once, so there is no single-alias query.
+    ///
+    /// Every alias with the notes that own it, lower-cased: the input the
+    /// link rewriting needs to keep bare names unambiguous and to leave
+    /// `[[Alias]]` links alone.
+    pub fn aliases_by_lower(&self) -> Result<HashMap<String, Vec<String>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT alias_lower, path FROM aliases ORDER BY alias_lower, path")?;
+        let mut out: HashMap<String, Vec<String>> = HashMap::new();
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (alias, path) = row?;
+            out.entry(alias).or_default().push(path);
+        }
+        Ok(out)
+    }
+
+    /// The notes a rename may have to rewrite: every note that links to one
+    /// of the moved files under any of the names a link can use for it
+    /// (path, path without `.md`, base name, stem), plus every note inside
+    /// the moved subtree itself (its relative markdown links change with
+    /// its folder). The rewriter decides per link what really changes; this
+    /// only narrows the notes that have to be read from disk.
+    pub fn rename_candidates(&self, moves: &[crate::link_rewrite::Move]) -> Result<Vec<String>> {
+        let mut keys: HashSet<String> = HashSet::new();
+        for m in moves {
+            let lower = m.from.to_lowercase();
+            keys.insert(lower.clone());
+            keys.insert(lower.strip_suffix(".md").unwrap_or(&lower).to_string());
+            let base = lower.rsplit('/').next().unwrap_or(&lower);
+            keys.insert(base.to_string());
+            keys.insert(stem(&lower).to_string());
+        }
+        let mut out: HashSet<String> = HashSet::new();
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT DISTINCT source FROM links WHERE target = ?1")?;
+            for key in &keys {
+                for row in stmt.query_map([key], |r| r.get::<_, String>(0))? {
+                    out.insert(row?);
+                }
+            }
+        }
+        // Relative markdown links are stored as written (`../note.md`), so
+        // they match no key above. Every link that ends in the base name of
+        // a moved file is a candidate; the rewriter filters precisely. One
+        // scan of the links table per moved file, no disk involved.
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT DISTINCT source FROM links WHERE target LIKE ?1 ESCAPE '\\'")?;
+            for m in moves {
+                let lower = m.from.to_lowercase();
+                let base = lower.rsplit('/').next().unwrap_or(&lower);
+                let mut pattern = String::from("%");
+                for c in base.chars() {
+                    if matches!(c, '\\' | '%' | '_') {
+                        pattern.push('\\');
+                    }
+                    pattern.push(c);
+                }
+                for row in stmt.query_map([&pattern], |r| r.get::<_, String>(0))? {
+                    out.insert(row?);
+                }
+            }
+        }
+        for m in moves {
+            // The moved file itself (outgoing relative links) and everything
+            // below it when a folder moved.
+            out.insert(m.from.clone());
+            let prefix = format!("{}/", m.from);
+            let mut stmt = self.conn.prepare(
+                "SELECT path FROM notes WHERE path LIKE ?1 ESCAPE '\\' AND substr(path, 1, ?2) = ?3",
+            )?;
+            let rows = stmt.query_map(
+                params![prefix_pattern(&prefix), prefix.chars().count() as i64, prefix],
+                |r| r.get::<_, String>(0),
+            )?;
+            for row in rows {
+                out.insert(row?);
+            }
+        }
+        let mut sorted: Vec<String> = out.into_iter().collect();
+        sorted.sort();
+        Ok(sorted)
     }
 
     /// All notes whose frontmatter `key` equals `value`, e.g. `status = active`.
@@ -774,6 +913,7 @@ impl Index {
                 path,
                 title,
                 tags: Vec::new(),
+                aliases: Vec::new(),
             });
         }
         let mut stmt = self
@@ -783,6 +923,15 @@ impl Index {
             let (path, tag) = row?;
             if let Some(&i) = by_path.get(&path) {
                 data.notes[i].tags.push(tag);
+            }
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, alias FROM aliases ORDER BY path, rowid")?;
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))? {
+            let (path, alias) = row?;
+            if let Some(&i) = by_path.get(&path) {
+                data.notes[i].aliases.push(alias);
             }
         }
         // The UNIQUE index on (source, target) holds every link once and in
@@ -815,6 +964,9 @@ impl Index {
         let mut tags = self
             .conn
             .prepare_cached("SELECT tag FROM tags WHERE path = ?1 ORDER BY tag")?;
+        let mut aliases = self
+            .conn
+            .prepare_cached("SELECT alias FROM aliases WHERE path = ?1 ORDER BY rowid")?;
         let mut links = self
             .conn
             .prepare_cached("SELECT target FROM links WHERE source = ?1 ORDER BY target")?;
@@ -833,6 +985,9 @@ impl Index {
                 path: path.clone(),
                 title,
                 tags: tags
+                    .query_map([path], |r| r.get(0))?
+                    .collect::<std::result::Result<_, _>>()?,
+                aliases: aliases
                     .query_map([path], |r| r.get(0))?
                     .collect::<std::result::Result<_, _>>()?,
             });
@@ -892,6 +1047,10 @@ impl Index {
             (
                 "SELECT source, target FROM links ORDER BY source, target",
                 "links",
+            ),
+            (
+                "SELECT path, alias, alias_lower FROM aliases ORDER BY path, rowid",
+                "aliases",
             ),
             (
                 "SELECT path, line, done, text, due, priority, tags, indent FROM tasks
@@ -1045,6 +1204,8 @@ fn remove_prefix(tx: &rusqlite::Transaction, prefix: &str) -> rusqlite::Result<(
         .execute([&pattern])?;
     tx.prepare_cached("DELETE FROM links WHERE source LIKE ?1 ESCAPE '\\'")?
         .execute([&pattern])?;
+    tx.prepare_cached("DELETE FROM aliases WHERE path LIKE ?1 ESCAPE '\\'")?
+        .execute([&pattern])?;
     tx.prepare_cached("DELETE FROM tasks WHERE path LIKE ?1 ESCAPE '\\'")?
         .execute([&pattern])?;
     Ok(())
@@ -1072,6 +1233,8 @@ fn delete_note(tx: &rusqlite::Transaction, rel: &str) -> rusqlite::Result<bool> 
     tx.prepare_cached("DELETE FROM tags WHERE path = ?1")?
         .execute([rel])?;
     tx.prepare_cached("DELETE FROM links WHERE source = ?1")?
+        .execute([rel])?;
+    tx.prepare_cached("DELETE FROM aliases WHERE path = ?1")?
         .execute([rel])?;
     tx.prepare_cached("DELETE FROM tasks WHERE path = ?1")?
         .execute([rel])?;
@@ -1109,6 +1272,15 @@ fn write_note(
         let mut insert_tag = tx.prepare_cached("INSERT INTO tags (path, tag) VALUES (?1, ?2)")?;
         for tag in &note.tags {
             insert_tag.execute(params![entry.path, tag])?;
+        }
+    }
+    {
+        let mut insert_alias = tx
+            .prepare_cached("INSERT INTO aliases (path, alias, alias_lower) VALUES (?1, ?2, ?3)")?;
+        for alias in &note.aliases {
+            // Lower-cased in Rust, not with SQLite's LOWER: that one only
+            // knows ASCII, an alias with umlauts must match too.
+            insert_alias.execute(params![entry.path, alias, alias.to_lowercase()])?;
         }
     }
     {
@@ -1236,6 +1408,94 @@ mod tests {
             .unwrap();
         index.update(&vault, ".obsidian/secret.md").unwrap();
         assert!(index.search("wortxyz", 10).unwrap().is_empty());
+    }
+
+    /// Aliases are indexed with the note, answer backlinks (also with
+    /// non-ASCII letters, which SQLite's LOWER does not know) and travel with a
+    /// folder rename like tags and links do.
+    #[test]
+    fn aliases_are_indexed_and_found_as_backlinks() {
+        let (_dir, vault) = sample_vault();
+        vault
+            .write(
+                "beta.md",
+                "---\naliases: [Bee, Café]\n---\n# Beta\nA #project.",
+            )
+            .unwrap();
+        vault
+            .write("links.md", "See [[Bee]], [[CAFÉ]] and [[beta]].")
+            .unwrap();
+        let mut index = Index::for_vault(&vault).unwrap();
+        index.rebuild(&vault).unwrap();
+
+        assert_eq!(
+            index.all_aliases().unwrap(),
+            vec![NoteAliases {
+                path: "beta.md".into(),
+                aliases: vec!["Bee".into(), "Café".into()],
+            }]
+        );
+        let owners = index.aliases_by_lower().unwrap();
+        assert_eq!(owners["bee"], vec!["beta.md"]);
+        assert_eq!(owners["café"], vec!["beta.md"]);
+
+        // Two backlinks: alpha.md of the sample vault links to [[Beta]] too,
+        // although links.md links three times (name and two aliases).
+        let backlinks = index.backlinks("beta.md").unwrap();
+        assert_eq!(backlinks.len(), 2);
+        assert!(backlinks.iter().any(|n| n.path == "links.md"));
+
+        // The graph carries the aliases, so `[[Bee]]` finds its note.
+        let graph = index.graph().unwrap();
+        let beta = graph.notes.iter().find(|n| n.path == "beta.md").unwrap();
+        assert_eq!(beta.aliases, vec!["Bee", "Café"]);
+        let part = index.graph_notes(&["beta.md".into()]).unwrap();
+        assert_eq!(part.notes[0].aliases, vec!["Bee", "Café"]);
+
+        // A folder rename keeps the aliases with their note.
+        vault.rename("beta.md", "notes/beta.md").unwrap();
+        index.remove("beta.md").unwrap();
+        index.update(&vault, "notes/beta.md").unwrap();
+        assert_eq!(index.backlinks("notes/beta.md").unwrap().len(), 2);
+        vault.rename("notes", "topics").unwrap();
+        index.move_folder(&vault, "notes", "topics").unwrap();
+        assert_eq!(
+            index.all_aliases().unwrap(),
+            vec![NoteAliases {
+                path: "topics/beta.md".into(),
+                aliases: vec!["Bee".into(), "Café".into()],
+            }]
+        );
+        assert_eq!(index.backlinks("topics/beta.md").unwrap().len(), 2);
+
+        // Removing the note takes its aliases out.
+        index.remove("topics").unwrap();
+        assert!(index.all_aliases().unwrap().is_empty());
+    }
+
+    /// An index from before the aliases table existed is rebuilt with it.
+    #[test]
+    fn an_index_without_the_aliases_table_is_built_again() {
+        let (_dir, vault) = sample_vault();
+        vault
+            .write("beta.md", "---\naliases: Bee\n---\n# Beta")
+            .unwrap();
+        let path = vault.app_dir().join("index.sqlite");
+        {
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE notes (path TEXT PRIMARY KEY, title TEXT NOT NULL,
+                                     frontmatter TEXT NOT NULL, modified INTEGER NOT NULL,
+                                     size INTEGER NOT NULL);
+                 INSERT INTO notes VALUES ('old.md', 'Old', '{}', 1, 10);
+                 PRAGMA user_version = 7;",
+            )
+            .unwrap();
+        }
+        let mut index = Index::open(&path).unwrap();
+        index.sync(&vault).unwrap();
+        assert_eq!(index.all_aliases().unwrap()[0].aliases, vec!["Bee"]);
+        assert!(index.search("Old", 10).unwrap().is_empty());
     }
 
     #[test]

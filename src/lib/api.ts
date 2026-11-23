@@ -42,9 +42,15 @@ export interface TagCount {
   count: number;
 }
 
+/** The frontmatter aliases of one note (see `Index::all_aliases`). */
+export interface NoteAliases {
+  path: string;
+  aliases: string[];
+}
+
 /** Everything the graph view needs (see `Index::graph` in `crates/dvoix-core/src/index.rs`). */
 export interface GraphData {
-  notes: { path: string; title: string; tags: string[] }[];
+  notes: { path: string; title: string; tags: string[]; aliases: string[] }[];
   /** `target` is the link text as written (lower-cased), not yet resolved to a file. */
   links: { source: string; target: string }[];
 }
@@ -164,7 +170,8 @@ export const api = {
   listHiddenEntries: (filter: HiddenFilter) => invoke<VaultEntry[]>("list_hidden_entries", { filter }),
   readFile: (path: string) => invoke<string>("read_file", { path }),
   writeFile: (path: string, content: string) => invoke<VaultEntry>("write_file", { path, content }),
-  renderMarkdown: (content: string) => invoke<RenderedNote>("render_markdown", { content }),
+  /** Renders a note; with `heading`, only that section (`![[note#heading]]`). */
+  renderMarkdown: (content: string, heading?: string) => invoke<RenderedNote>("render_markdown", { content, heading }),
   createFile: (path: string, content: string) => invoke<VaultEntry>("create_file", { path, content }),
   /** Reads any file as bytes (images and other attachments). */
   readBinary: (path: string) => invoke<ArrayBuffer>("read_binary", { path }),
@@ -185,6 +192,8 @@ export const api = {
   notesWithTag: (tag: string) => invoke<NoteSummary[]>("notes_with_tag", { tag }),
   notesWhere: (key: string, value: string) => invoke<NoteSummary[]>("notes_where", { key, value }),
   backlinks: (path: string) => invoke<NoteSummary[]>("backlinks", { path }),
+  /** Frontmatter aliases per note, for link resolution and the suggestions. */
+  aliases: () => invoke<NoteAliases[]>("aliases"),
   graph: () => invoke<GraphData>("graph"),
   /** The graph data of only these notes; a path missing from the answer is not a note (anymore). */
   graphNotes: (paths: string[]) => invoke<GraphData>("graph_notes", { paths }),

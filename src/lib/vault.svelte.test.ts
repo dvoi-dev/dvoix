@@ -10,6 +10,7 @@ vi.mock("./api", () => ({
     openVault: vi.fn(),
     closeVault: vi.fn(),
     listEntries: vi.fn(async () => []),
+    aliases: vi.fn(async () => []),
     readFile: vi.fn(async () => ""),
     writeFile: vi.fn(),
     createFile: vi.fn(),
@@ -48,6 +49,11 @@ function entry(path: string, isDir = false): VaultEntry {
   return { path, name, extension: isDir || !name.includes(".") ? "" : name.split(".").pop()!, isDir, size: 10, modified: 1000 };
 }
 
+/** Puts alias rows into the store, the way `refresh` reads them from the index. */
+function setAliases(rows: { path: string; aliases: string[] }[]) {
+  (vault as unknown as { aliasRows: { path: string; aliases: string[] }[] }).aliasRows = rows;
+}
+
 /** The private bookkeeping of the store, reset between tests. */
 interface Privates {
   navHistory: unknown[];
@@ -69,6 +75,7 @@ function reset() {
   priv.selfWrites = [];
   vault.info = null;
   vault.entries = [];
+  (vault as unknown as { aliasRows: unknown[] }).aliasRows = [];
   vault.tabs = [];
   vault.activeTabId = 0;
   vault.split = null;
@@ -83,6 +90,7 @@ beforeEach(() => {
   reset();
   vi.useFakeTimers();
   vi.mocked(api.listEntries).mockImplementation(async () => [...vault.entries]);
+  vi.mocked(api.aliases).mockImplementation(async () => (vault as unknown as { aliasRows: { path: string; aliases: string[] }[] }).aliasRows);
   vi.mocked(api.readFile).mockImplementation(async (path) => `content of ${path}`);
   vi.mocked(api.writeFile).mockImplementation(async (path) => entry(path));
   vi.mocked(api.createFile).mockImplementation(async (path) => entry(path));
@@ -212,6 +220,36 @@ describe("links", () => {
     await vault.openLink("Fresh Note");
     expect(api.createFile).toHaveBeenCalledWith("Fresh Note.md", "# Fresh Note\n\n");
     expect(vault.openPath).toBe("Fresh Note.md");
+  });
+
+  it("resolves frontmatter aliases, case-insensitive", () => {
+    vault.entries = [entry("Projects/Meeting-Planning.md")];
+    setAliases([{ path: "Projects/Meeting-Planning.md", aliases: ["Weekly Sync", "Café"] }]);
+    expect(vault.resolveLink("weekly sync")).toBe("Projects/Meeting-Planning.md");
+    expect(vault.resolveLink("CAFÉ")).toBe("Projects/Meeting-Planning.md");
+    expect(vault.aliasesFor("projects/meeting-planning.md")).toEqual(["Weekly Sync", "Café"]);
+    expect(vault.aliasesFor("other.md")).toEqual([]);
+  });
+
+  it("prefers an exact path and a file name over an alias", () => {
+    vault.entries = [entry("Alpha.md"), entry("Beta.md")];
+    setAliases([{ path: "Beta.md", aliases: ["Alpha"] }]);
+    expect(vault.resolveLink("Alpha")).toBe("Alpha.md");
+    setAliases([{ path: "Beta.md", aliases: ["alpha.md"] }]);
+    expect(vault.resolveLink("alpha.md")).toBe("Alpha.md");
+  });
+
+  it("answers an ambiguous name or alias by path proximity, then path order", () => {
+    vault.entries = [entry("a/Note.md"), entry("b/Note.md"), entry("b/Here.md")];
+    expect(vault.resolveLink("Note", "b/Here.md")).toBe("b/Note.md");
+    expect(vault.resolveLink("Note", "a/Here.md")).toBe("a/Note.md");
+    expect(vault.resolveLink("Note", null)).toBe("a/Note.md");
+    setAliases([
+      { path: "a/Note.md", aliases: ["Shared"] },
+      { path: "b/Note.md", aliases: ["Shared"] },
+    ]);
+    expect(vault.resolveLink("Shared", "b/Here.md")).toBe("b/Note.md");
+    expect(vault.resolveLink("Shared", null)).toBe("a/Note.md");
   });
 });
 

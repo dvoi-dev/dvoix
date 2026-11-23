@@ -16,6 +16,8 @@
     nameStart: number;
     badge: string;
     indices: number[];
+    /** The frontmatter alias the query matched, when it was not the label. */
+    alias?: { text: string; indices: number[] };
   }
 
   let query = $state("");
@@ -36,9 +38,26 @@
       const isNote = fileTypeFor(f.path)?.id === "markdown";
       const label = isNote ? f.path.replace(/\.md$/i, "") : f.path;
       const m = fuzzyMatch(q, label);
-      if (!m) continue;
-      const item = { path: f.path, label, nameStart: label.lastIndexOf("/") + 1, badge: isNote ? "" : f.extension.toUpperCase(), indices: m.indices };
-      scored.push({ item, score: m.score });
+      // Frontmatter aliases are searched too; the best hit (path or alias)
+      // wins per note, an ambiguous alias shows every note that owns it.
+      let bestAlias: { text: string; indices: number[]; score: number } | undefined;
+      if (q) {
+        for (const alias of vault.aliasesFor(f.path)) {
+          const am = fuzzyMatch(q, alias);
+          if (am && (!bestAlias || am.score > bestAlias.score)) bestAlias = { text: alias, indices: am.indices, score: am.score };
+        }
+      }
+      if (!m && !bestAlias) continue;
+      const aliasWins = !!bestAlias && (!m || bestAlias.score > m.score);
+      const item: Item = {
+        path: f.path,
+        label,
+        nameStart: label.lastIndexOf("/") + 1,
+        badge: isNote ? "" : f.extension.toUpperCase(),
+        indices: aliasWins ? [] : (m?.indices ?? []),
+        alias: aliasWins ? { text: bestAlias!.text, indices: bestAlias!.indices } : undefined,
+      };
+      scored.push({ item, score: aliasWins ? bestAlias!.score : m!.score });
     }
     if (q) scored.sort((a, b) => b.score - a.score);
     return scored.slice(0, LIMIT).map((s) => s.item);
@@ -134,6 +153,14 @@
               <span class="ml-2 text-xs text-zinc-500">
                 {#each highlight(item.label.slice(0, item.nameStart - 1), item.indices) as part, k (k)}
                   <span class={part.hit ? "text-violet-400" : ""}>{part.text}</span>
+                {/each}
+              </span>
+            {/if}
+            {#if item.alias}
+              <span class="ml-2 text-xs text-zinc-400">
+                alias:
+                {#each highlight(item.alias.text, item.alias.indices) as part, k (k)}
+                  <span class={part.hit ? "font-semibold text-violet-300" : ""}>{part.text}</span>
                 {/each}
               </span>
             {/if}

@@ -19,14 +19,18 @@ export function isImage(path: string): boolean {
 }
 
 /**
- * Splits the inside of `![[...]]` into the file and an optional width
- * (`![[photo.png|300]]`, like in Obsidian).
+ * Splits the inside of `![[...]]` into the file, an optional heading
+ * (`![[note#section]]`) and an optional width (`![[photo.png|300]]`, like in
+ * Obsidian).
  */
-export function parseEmbed(inner: string): { target: string; width?: number } {
+export function parseEmbed(inner: string): { target: string; heading?: string; width?: number } {
   const pipe = inner.indexOf("|");
-  const target = (pipe >= 0 ? inner.slice(0, pipe) : inner).split("#")[0].trim();
+  const before = (pipe >= 0 ? inner.slice(0, pipe) : inner).trim();
+  const hash = before.indexOf("#");
+  const target = (hash >= 0 ? before.slice(0, hash) : before).trim();
+  const heading = hash >= 0 ? before.slice(hash + 1).trim() : "";
   const size = pipe >= 0 ? /^\s*(\d+)(?:x\d+)?\s*$/.exec(inner.slice(pipe + 1)) : null;
-  return { target, width: size ? Number(size[1]) : undefined };
+  return { target, heading: heading || undefined, width: size ? Number(size[1]) : undefined };
 }
 
 // One blob URL per file and version; a changed file (same path, newer

@@ -6,10 +6,10 @@
 //! window (on Windows it stays white until the work is done).
 
 use dvoix_core::{
-    GraphData, HiddenFilter, NoteSummary, RenderedNote, SearchHit, TaskItem, TrashedEntry,
-    VaultEntry, index::TagCount, markdown, tasks,
+    GraphData, HiddenFilter, NoteAliases, NoteSummary, RenderedNote, SearchHit, TaskItem,
+    TrashedEntry, VaultEntry, index::TagCount, link_rewrite::{LinkRewriter, Move}, markdown, tasks,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
 use crate::{AppState, VaultHandle, Workspace, http, settings};
@@ -182,10 +182,12 @@ fn percent_decode(text: &str) -> CmdResult<String> {
 }
 
 /// Renders a note as HTML for the reading view. It only depends on the text of
-/// the note, so it needs no vault.
+/// the note, so it needs no vault. With `heading`, only that section is
+/// rendered (`![[note#heading]]`); a missing heading is an error.
 #[tauri::command(async)]
-pub fn render_markdown(content: String) -> RenderedNote {
-    markdown::render(&content)
+pub fn render_markdown(content: String, heading: Option<String>) -> CmdResult<RenderedNote> {
+    markdown::render_section(&content, heading.as_deref())
+        .ok_or_else(|| "The note has no such heading.".to_string())
 }
 
 #[tauri::command(async)]
@@ -207,6 +209,164 @@ pub fn rename_entry(state: State<AppState>, from: String, to: String) -> CmdResu
             index.update(&ws.vault, &to).map_err(err)?;
         }
         Ok(entry)
+    })
+}
+
+/// A note whose links a rename rewrote, with its text from before the
+/// rewrite so an undo can put it back byte for byte.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdatedLinkFile {
+    pub entry: VaultEntry,
+    pub previous_content: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameResult {
+    pub entry: VaultEntry,
+    pub updated_files: Vec<UpdatedLinkFile>,
+}
+
+/// Renames a file or folder and updates the links of other notes that named
+/// it: wikilinks, embeds and relative markdown links, minimal and
+/// code-block-safe (see `link_rewrite`). Every rewritten note comes back
+/// with its previous text, so `undo_rename_with_links` can restore it.
+#[tauri::command(async)]
+pub fn rename_with_links(
+    state: State<AppState>,
+    from: String,
+    to: String,
+) -> CmdResult<RenameResult> {
+    with_ws(&state, |ws| {
+        // The moves are known before anything changes: one file, or every
+        // file of the moved folder with its new path.
+        let source = ws.vault.entry(&from).map_err(err)?;
+        let moves: Vec<Move> = if source.is_dir {
+            ws.vault
+                .files_below(&from)
+                .map_err(err)?
+                .into_iter()
+                .map(|e| Move {
+                    to: format!("{to}{}", &e.path[from.len()..]),
+                    from: e.path,
+                })
+                .collect()
+        } else {
+            vec![Move {
+                from: from.clone(),
+                to: to.clone(),
+            }]
+        };
+        let candidates = {
+            let index = ws.index.lock().map_err(err)?;
+            index.rename_candidates(&moves).map_err(err)?
+        };
+        let entry = ws.vault.rename(&from, &to).map_err(err)?;
+        {
+            let mut index = ws.index.lock().map_err(err)?;
+            if entry.is_dir {
+                index.move_folder(&ws.vault, &from, &to).map_err(err)?;
+            } else {
+                index.remove(&from).map_err(err)?;
+                index.update(&ws.vault, &to).map_err(err)?;
+            }
+        }
+        // The rewriter works on the vault as it is after the move; the
+        // alias map comes from the index (also already moved).
+        let files: Vec<String> = ws
+            .vault
+            .files()
+            .map_err(err)?
+            .into_iter()
+            .map(|e| e.path)
+            .collect();
+        let aliases = ws.index.lock().map_err(err)?.aliases_by_lower().map_err(err)?;
+        let rewriter = LinkRewriter::new(&files, &aliases, &moves);
+        let mut updated_files = Vec::new();
+        for old_path in candidates {
+            // A candidate inside the moved subtree is read at its new path.
+            let path = match moves.iter().find(|m| m.from == old_path) {
+                Some(m) => m.to.clone(),
+                None if old_path.starts_with(&format!("{from}/")) => {
+                    format!("{to}{}", &old_path[from.len()..])
+                }
+                None => old_path,
+            };
+            let Ok(content) = ws.vault.read(&path) else {
+                continue; // not a readable note (binary, gone); nothing to rewrite
+            };
+            let Some(new_content) = rewriter.rewrite(&path, &content) else {
+                continue;
+            };
+            let written = ws.vault.write(&path, &new_content).map_err(err)?;
+            reindex(ws, &path)?;
+            updated_files.push(UpdatedLinkFile {
+                entry: written,
+                previous_content: content,
+            });
+        }
+        Ok(RenameResult {
+            entry,
+            updated_files,
+        })
+    })
+}
+
+/// Moves a renamed file or folder back and restores the previous text of
+/// every note whose links the rename rewrote. A note that changed again
+/// since (different size or time than the rewrite left) is not overwritten;
+/// it is reported back so the user knows.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoRenameResult {
+    pub entry: VaultEntry,
+    /// Notes whose text was restored.
+    pub restored: Vec<String>,
+    /// Notes that changed since the rename and were left alone.
+    pub skipped: Vec<String>,
+}
+
+#[tauri::command(async)]
+pub fn undo_rename_with_links(
+    state: State<AppState>,
+    from: String,
+    to: String,
+    snapshots: Vec<UpdatedLinkFile>,
+) -> CmdResult<UndoRenameResult> {
+    with_ws(&state, |ws| {
+        let entry = ws.vault.rename(&from, &to).map_err(err)?;
+        {
+            let mut index = ws.index.lock().map_err(err)?;
+            if entry.is_dir {
+                index.move_folder(&ws.vault, &from, &to).map_err(err)?;
+            } else {
+                index.remove(&from).map_err(err)?;
+                index.update(&ws.vault, &to).map_err(err)?;
+            }
+        }
+        let mut restored = Vec::new();
+        let mut skipped = Vec::new();
+        for snapshot in snapshots {
+            let path = &snapshot.entry.path;
+            // The note must still be exactly what the rewrite left behind;
+            // a newer edit of the user wins over the undo.
+            let current = ws.vault.entry(path).map_err(err)?;
+            if current.size != snapshot.entry.size || current.modified != snapshot.entry.modified {
+                skipped.push(path.clone());
+                continue;
+            }
+            ws.vault
+                .write(path, &snapshot.previous_content)
+                .map_err(err)?;
+            reindex(ws, path)?;
+            restored.push(path.clone());
+        }
+        Ok(UndoRenameResult {
+            entry,
+            restored,
+            skipped,
+        })
     })
 }
 
@@ -317,6 +477,15 @@ pub fn notes_where(
 pub fn backlinks(state: State<AppState>, path: String) -> CmdResult<Vec<NoteSummary>> {
     with_ws(&state, |ws| {
         ws.index.lock().map_err(err)?.backlinks(&path).map_err(err)
+    })
+}
+
+/// The frontmatter aliases of every note that has them; the app resolves
+/// `[[Alias]]` links and offers aliases in the suggestions with this.
+#[tauri::command(async)]
+pub fn aliases(state: State<AppState>) -> CmdResult<Vec<NoteAliases>> {
+    with_ws(&state, |ws| {
+        ws.index.lock().map_err(err)?.all_aliases().map_err(err)
     })
 }
 
