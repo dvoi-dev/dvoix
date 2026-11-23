@@ -27,10 +27,12 @@
   }
 
   function menu(e: MouseEvent, tab: Tab) {
+    const extra = plugins.tabMenuItems(tab);
     contextMenu.show(e, [
       { label: tab.pinned ? "Unpin tab" : "Pin tab", icon: tab.pinned ? PinOff : Pin, action: () => vault.togglePin(tab.id) },
       { label: "Split right", icon: Columns2, action: () => void vault.splitRight(tab.id) },
       ...(vault.split ? [{ label: "Close split", icon: Columns2, action: () => void vault.closeSplit() }] : []),
+      ...(extra.length ? (["separator", ...extra] as const) : []),
       "separator",
       { label: "Close", icon: X, action: () => void vault.closeTab(tab.id) },
       { label: "Close other tabs", action: () => void vault.closeOtherTabs(tab.id) },

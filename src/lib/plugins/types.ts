@@ -6,8 +6,10 @@
 import type { Extension } from "@codemirror/state";
 import type { Component } from "svelte";
 import type { VaultEntry } from "../api";
+import type { MenuEntry } from "../components/contextMenuState.svelte";
 import type { AppEventHandler, AppEventName } from "../events";
 import type { FileType } from "../filetypes/types";
+import type { Tab } from "../vault.svelte";
 
 /** Describes a plugin. For community plugins this would be their `manifest.json`. */
 export interface PluginManifest {
@@ -162,6 +164,31 @@ export interface SettingTabSpec {
   component: Component;
 }
 
+/** Which entry of the file explorer was right-clicked. */
+export interface FileMenuContext {
+  /** The entry, or null when the empty area of the explorer was clicked (vault root). */
+  entry: VaultEntry | null;
+  /** Where "create" actions belong: the folder itself, the parent folder of a file, "" for the root. */
+  folder: string;
+}
+
+/**
+ * Extra items in the right-click menu of the file explorer. `items` runs when
+ * the menu opens; an empty array adds nothing (and no separator).
+ */
+export interface FileMenuContributor {
+  id: string;
+  order?: number;
+  items: (ctx: FileMenuContext) => MenuEntry[];
+}
+
+/** Extra items in the right-click menu of a tab. Empty array adds nothing. */
+export interface TabMenuContributor {
+  id: string;
+  order?: number;
+  items: (tab: Tab) => MenuEntry[];
+}
+
 export type Dispose = () => void;
 
 export interface PluginContext {
@@ -184,6 +211,10 @@ export interface PluginContext {
   registerView(view: ViewSpec): Dispose;
   /** More entries in the file explorer only, e.g. hidden folders. */
   addExplorerEntries(source: ExplorerEntriesSpec): Dispose;
+  /** Items in the right-click menu of the file explorer, e.g. "Bookmark". */
+  addFileMenu(contributor: FileMenuContributor): Dispose;
+  /** Items in the right-click menu of a tab. */
+  addTabMenu(contributor: TabMenuContributor): Dispose;
   addSettingTab(tab: SettingTabSpec): Dispose;
   /**
    * Calls `handler` on an app event (see `AppEvents` in `src/lib/events.ts`):

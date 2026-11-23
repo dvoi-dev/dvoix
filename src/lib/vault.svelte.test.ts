@@ -290,3 +290,46 @@ describe("file operations", () => {
     expect(vault.changes.notes.number).toBeGreaterThan(before.notes);
   });
 });
+
+describe("openOrCreateFile", () => {
+  it("creates a missing file with the given content and opens it", async () => {
+    await vault.newTab();
+    const path = await vault.openOrCreateFile("Daily/2026-11-23.md", "# 2026-11-23\n\n");
+    expect(path).toBe("Daily/2026-11-23.md");
+    expect(api.createFile).toHaveBeenCalledWith("Daily/2026-11-23.md", "# 2026-11-23\n\n");
+    expect(vault.openPath).toBe("Daily/2026-11-23.md");
+    expect(vault.entryAt("Daily/2026-11-23.md")).toBeDefined();
+    expect(vault.error).toBeNull();
+  });
+
+  it("opens an existing file without writing to it", async () => {
+    vault.entries = [entry("Daily/2026-11-23.md")];
+    await vault.newTab();
+    const path = await vault.openOrCreateFile("Daily/2026-11-23.md", "must not be written");
+    expect(path).toBe("Daily/2026-11-23.md");
+    expect(api.createFile).not.toHaveBeenCalled();
+    expect(api.writeFile).not.toHaveBeenCalled();
+    expect(vault.openPath).toBe("Daily/2026-11-23.md");
+  });
+
+  it("a file that appeared between check and create is opened instead of failing", async () => {
+    vi.mocked(api.createFile).mockImplementation(async (path) => {
+      // Another click or a sync tool created the file after the existence check.
+      vault.entries = [...vault.entries, entry(path)];
+      throw `path already exists: ${path}`;
+    });
+    await vault.newTab();
+    const path = await vault.openOrCreateFile("Daily/2026-11-23.md", "# 2026-11-23\n\n");
+    expect(path).toBe("Daily/2026-11-23.md");
+    expect(vault.error).toBeNull();
+    expect(vault.openPath).toBe("Daily/2026-11-23.md");
+  });
+
+  it("reports real failures and returns null", async () => {
+    vi.mocked(api.createFile).mockRejectedValueOnce("disk full");
+    await vault.newTab();
+    const path = await vault.openOrCreateFile("Daily/2026-11-23.md", "");
+    expect(path).toBeNull();
+    expect(vault.error).toBe("disk full");
+  });
+});

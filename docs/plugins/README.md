@@ -79,6 +79,8 @@ Views are `mount(el, props)` functions: they draw into an empty element and opti
 | `addPaneHeader({ id, mount })` | something above the open file |
 | `addStatusBarItem({ id, mount, align, order })` | item in the bottom status bar (`align: "left" \| "right"`) |
 | `addOverlay({ id, mount })` | element on the top layer (dialogs) |
+| `addFileMenu({ id, order, items })` | items in the right-click menu of the file explorer; `items(ctx)` runs when the menu opens and gets `{ entry, folder }` (`entry` is the entry or `null` for the empty area, `folder` is where "create" actions belong). Return `[]` to add nothing |
+| `addTabMenu({ id, order, items })` | items in the right-click menu of a tab; `items({ path, view, pinned })`, `path` is `null` for views and empty tabs |
 | `registerView({ id, label, icon, mount })` | own view in a tab, open with `dvoix.openView(id)` |
 | `registerFileType({ id, label, extensions, icon, template, mount })` | new file type; `props` has `path`, `content`, `onchange(text)`, `onopen(path)`, `focused` (whether the pane is focused), `update(props)` is called when the content or pane focus changes |
 | `registerEditorExtension(ext)` | CodeMirror extension, built with `dvoix.lib.codemirror.state` / `.view` (same instance as the editor); `dvoix.lib.codemirror.merge` is `@codemirror/merge` for diff views |
@@ -92,6 +94,20 @@ Views are `mount(el, props)` functions: they draw into an empty element and opti
 | `workspace.activeFile()` | vault-relative path of the file in the active tab, `null` for views and empty tabs |
 | `workspace.onActiveFileChange(fn)` | `fn(path)` whenever `activeFile()` changes; also once right after the vault opened |
 | `process.spawn({ command, args, stdin, env, onStdout, onStderr, onExit })` | needs `process`; see below |
+
+### Context menus
+
+```js
+dvoix.addFileMenu({
+  id: "word-count",
+  items: ({ entry, folder }) =>
+    entry && !entry.isDir
+      ? [{ label: "Count words", icon: "<svg …>", action: () => count(entry.path) }]
+      : [{ label: "New note here", action: () => create(folder) }],
+});
+```
+
+An item is `{ label, icon, danger, action }`: `icon` is SVG text (optional), `danger: true` shows the label in red for destructive actions. `items` runs every time the menu opens, so labels can depend on the current state ("Bookmark" / "Remove bookmark"). Return an empty array to contribute nothing; the app then adds no separator either. Items of different plugins are separated automatically, and a plugin whose `items` throws only loses its own group.
 
 ### Running programs (`process`)
 
