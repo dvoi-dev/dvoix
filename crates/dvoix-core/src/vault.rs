@@ -934,6 +934,46 @@ mod tests {
     }
 
     #[test]
+    fn creates_a_note_with_its_folders_once() {
+        // What "open today's daily note" does on disk: the folders of the date
+        // format are created, and a second run must not overwrite the note.
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        let path = "Daily/2026/11/2026-11-23.md";
+        vault.create(path, "# 2026-11-23\n").unwrap();
+        assert_eq!(vault.read(path).unwrap(), "# 2026-11-23\n");
+        assert!(dir.path().join("Daily/2026/11").is_dir());
+
+        let again = vault.create(path, "would overwrite");
+        assert!(matches!(again, Err(Error::AlreadyExists(_))));
+        assert_eq!(vault.read(path).unwrap(), "# 2026-11-23\n");
+    }
+
+    #[test]
+    fn bookmarks_live_in_the_vault_and_survive_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = "{\"items\":[{\"type\":\"file\",\"path\":\"Notes/idea.md\"}]}\n";
+        {
+            let vault = Vault::open(dir.path()).unwrap();
+            vault.create("Notes/idea.md", "# Idea").unwrap();
+            vault.write_config("bookmarks.json", json).unwrap();
+            // The list belongs to the vault, not to the visible file tree.
+            assert!(
+                !vault
+                    .list()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.path.contains("bookmarks"))
+            );
+        }
+        let reopened = Vault::open(dir.path()).unwrap();
+        assert_eq!(
+            reopened.read_config("bookmarks.json").unwrap().as_deref(),
+            Some(json)
+        );
+    }
+
+    #[test]
     fn lists_css_snippets_sorted_case_insensitively() {
         let dir = tempfile::tempdir().unwrap();
         let vault = Vault::open(dir.path()).unwrap();

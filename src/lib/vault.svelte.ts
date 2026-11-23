@@ -1163,6 +1163,35 @@ class VaultStore {
     }
   }
 
+  /**
+   * Opens `path`, creating it with `content` when it does not exist yet
+   * (daily notes, "new note from template"). Returns the opened path, or null
+   * when something went wrong (then `error` says what). A file that appears
+   * between the check and the create (double click, sync) is opened, not an error.
+   */
+  async openOrCreateFile(path: string, content: string, opts: OpenOptions = {}): Promise<string | null> {
+    const existing = this.entryAt(path);
+    if (existing && !existing.isDir) {
+      await this.openFile(existing.path, opts);
+      return existing.path;
+    }
+    try {
+      await this.flush();
+      const entry = await api.createFile(path, content);
+      this.insertEntry(entry);
+      this.appliedOwnChange([path], isNote(path));
+      appEvents.emit("file-create", { path, isDir: false });
+    } catch (e) {
+      if (!String(e).startsWith("path already exists:")) {
+        this.error = String(e);
+        return null;
+      }
+      // Created between the check and the write: open what is there.
+    }
+    await this.openFile(path, opts);
+    return this.entryAt(path)?.path ?? path;
+  }
+
   async createFolder(parent = "") {
     const prefix = parent ? `${parent}/` : "";
     const taken = new Set(this.entries.map((e) => e.path.toLowerCase()));

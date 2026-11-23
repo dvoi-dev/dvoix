@@ -4,7 +4,7 @@
   import { buildTree, mergeEntries } from "./tree";
   import { treeFocus } from "./treeFocus.svelte";
   import { contextMenu } from "../../components/contextMenuState.svelte";
-  import { DRAG_TYPE, createItems } from "./fileMenu";
+  import { DRAG_TYPE, rootMenu } from "./fileMenu";
   import { vault } from "../../vault.svelte";
   import { ui } from "../../ui.svelte";
   import { plugins } from "../../plugins/manager.svelte";
@@ -111,7 +111,7 @@
   aria-label="Files"
   onkeydown={keydown}
   onfocusin={focusin}
-  oncontextmenu={(e) => contextMenu.show(e, createItems(""))}
+  oncontextmenu={(e) => contextMenu.show(e, rootMenu())}
   ondragover={(e) => {
     if (!e.dataTransfer?.types.includes(DRAG_TYPE)) return;
     e.preventDefault();

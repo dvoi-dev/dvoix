@@ -16,6 +16,7 @@ import type { Extension } from "@codemirror/state";
 import { api, type PluginPermission, type StoreManifest, type VaultEntry } from "../../api";
 import { type AppEvents } from "../../events";
 import { vault, type VaultChangeKind } from "../../vault.svelte";
+import type { MenuEntry } from "../../components/contextMenuState.svelte";
 import type { CommandSpec, Dispose, PluginContext } from "../types";
 import { iconComponent, mountComponent } from "./component";
 
@@ -50,6 +51,30 @@ export interface ProcessHandle {
   kill(): void;
 }
 
+/** One item of a context menu a store plugin contributes. */
+export interface StoreMenuItem {
+  label: string;
+  /** SVG text; without it the item has no icon (like the app's own items). */
+  icon?: string;
+  /** Shown in red, for destructive actions. */
+  danger?: boolean;
+  action: () => void;
+}
+
+/** Which explorer entry was right-clicked; `entry` is null for the empty area. */
+export interface StoreFileMenuContext {
+  entry: VaultEntry | null;
+  /** Where "create" actions belong: the folder itself, the parent of a file, "" for the root. */
+  folder: string;
+}
+
+/** Which tab was right-clicked; `path` is null for views and empty tabs. */
+export interface StoreTabMenuContext {
+  path: string | null;
+  view?: string;
+  pinned?: boolean;
+}
+
 /** The object a store plugin's `onload` receives. */
 export interface DvoixPluginApi {
   readonly manifest: StoreManifest;
@@ -62,6 +87,10 @@ export interface DvoixPluginApi {
   addPaneHeader(spec: { id: string; order?: number; mount: MountFn }): Dispose;
   addStatusBarItem(spec: { id: string; align?: "left" | "right"; order?: number; mount: MountFn }): Dispose;
   addOverlay(spec: { id: string; mount: MountFn }): Dispose;
+  /** Items in the right-click menu of the file explorer; an empty array adds nothing. */
+  addFileMenu(spec: { id: string; order?: number; items: (ctx: StoreFileMenuContext) => StoreMenuItem[] }): Dispose;
+  /** Items in the right-click menu of a tab; an empty array adds nothing. */
+  addTabMenu(spec: { id: string; order?: number; items: (ctx: StoreTabMenuContext) => StoreMenuItem[] }): Dispose;
   /** A view in a tab; open it with `openView(id)`. */
   registerView(spec: { id: string; label: string; icon?: string; mount: MountFn }): Dispose;
   registerFileType(spec: {
@@ -123,6 +152,11 @@ export const PERMISSION_LABELS: Record<PluginPermission, string> = {
   process: "Run programs on your computer, started in the vault folder (they can reach any file you can)",
 };
 
+/** Turns the items of a store plugin into menu entries, icons as components. */
+function storeMenuItems(items: StoreMenuItem[]): MenuEntry[] {
+  return items.map((i) => ({ label: i.label, icon: i.icon ? iconComponent(i.icon) : undefined, danger: i.danger, action: i.action }));
+}
+
 export function createApi(ctx: PluginContext, manifest: StoreManifest): DvoixPluginApi {
   const pid = manifest.id;
   const own = (id: string) => `${pid}:${id}`;
@@ -156,6 +190,9 @@ export function createApi(ctx: PluginContext, manifest: StoreManifest): DvoixPlu
     addStatusBarItem: (s) =>
       ctx.addStatusBarItem({ id: own(s.id), align: s.align, order: s.order, component: mountComponent(s.mount) }),
     addOverlay: (s) => ctx.addOverlay({ id: own(s.id), component: mountComponent(s.mount) }),
+    addFileMenu: (s) => ctx.addFileMenu({ id: own(s.id), order: s.order, items: (c) => storeMenuItems(s.items(c)) }),
+    addTabMenu: (s) =>
+      ctx.addTabMenu({ id: own(s.id), order: s.order, items: (t) => storeMenuItems(s.items({ path: t.path, view: t.view, pinned: t.pinned })) }),
     registerView: (s) =>
       ctx.registerView({ id: own(s.id), label: s.label, icon: iconComponent(s.icon), component: mountComponent(s.mount) }),
     registerFileType: (s) =>

@@ -5,13 +5,16 @@ import type { Extension } from "@codemirror/state";
 import { readJsonRaw, readJson, writeJson } from "../config";
 import { appEvents } from "../events";
 import { registerFileType } from "../filetypes";
-import { vault } from "../vault.svelte";
+import { vault, type Tab } from "../vault.svelte";
 import { hotkeys } from "../hotkeys.svelte";
+import type { MenuEntry } from "../components/contextMenuState.svelte";
 import type {
   CommandSpec,
   Dispose,
   ExplorerEntriesSpec,
   FileFooterSpec,
+  FileMenuContext,
+  FileMenuContributor,
   Hotkey,
   OverlaySpec,
   PaneHeaderSpec,
@@ -23,6 +26,7 @@ import type {
   RightSidebarSpec,
   SettingTabSpec,
   StatusBarItemSpec,
+  TabMenuContributor,
   ViewSpec,
 } from "./types";
 
@@ -80,6 +84,8 @@ class PluginManager {
   private settingList = $state.raw<(SettingTabSpec & Owned)[]>([]);
   private viewList = $state.raw<(ViewSpec & Owned)[]>([]);
   private explorerEntryList = $state.raw<(ExplorerEntriesSpec & Owned)[]>([]);
+  private fileMenuList = $state.raw<(FileMenuContributor & Owned)[]>([]);
+  private tabMenuList = $state.raw<(TabMenuContributor & Owned)[]>([]);
   private viewRemovedListeners = new Set<(id: string) => void>();
   private extensionList: { pluginId: string; extension: Extension }[] = [];
   private disposers = new Map<string, Dispose[]>();
@@ -101,6 +107,8 @@ class PluginManager {
   views = $derived(this.viewList);
   /** Extra file explorer entries of all loaded plugins (see `addExplorerEntries`). */
   explorerEntries = $derived(this.explorerEntryList.flatMap((s) => s.entries()));
+  private fileMenus = $derived(byOrder(this.fileMenuList));
+  private tabMenus = $derived(byOrder(this.tabMenuList));
 
   /** Makes a core plugin known to the app. Call before a vault is opened. */
   add(plugin: Plugin) {
@@ -158,6 +166,20 @@ class PluginManager {
   /** Markdown editor extensions of all loaded plugins. */
   editorExtensions(): Extension[] {
     return this.extensionList.map((e) => e.extension);
+  }
+
+  /**
+   * Plugin items for the right-click menu of a file explorer entry (or the
+   * root when `entry` is null). Groups of different plugins are separated;
+   * a plugin that returns nothing contributes nothing, not even a separator.
+   */
+  fileMenuItems(ctx: FileMenuContext): MenuEntry[] {
+    return collectMenuItems(this.fileMenus, (c) => c.items(ctx));
+  }
+
+  /** Plugin items for the right-click menu of a tab, separated by plugin. */
+  tabMenuItems(tab: Tab): MenuEntry[] {
+    return collectMenuItems(this.tabMenus, (c) => c.items(tab));
   }
 
   /** Loads every core feature, then reads `core-plugins.json` and loads every plugin that is on. */
@@ -378,6 +400,20 @@ class PluginManager {
       },
       addExplorerEntries: (source) =>
         addTo(() => this.explorerEntryList, (v) => (this.explorerEntryList = v), { ...source, pluginId }, (s) => s.id),
+      addFileMenu: (contributor) =>
+        addTo(
+          () => this.fileMenuList,
+          (v) => (this.fileMenuList = v),
+          { ...contributor, pluginId },
+          (c) => `${c.pluginId}:${c.id}`,
+        ),
+      addTabMenu: (contributor) =>
+        addTo(
+          () => this.tabMenuList,
+          (v) => (this.tabMenuList = v),
+          { ...contributor, pluginId },
+          (c) => `${c.pluginId}:${c.id}`,
+        ),
       on: (event, handler) => track(appEvents.on(event, handler)),
       register: (fn) => void track(fn),
       loadData: (defaults) => readJson(dataFile, defaults),
@@ -393,6 +429,25 @@ function matches(h: Hotkey, e: KeyboardEvent): boolean {
     !!h.alt === e.altKey &&
     h.key.toLowerCase() === e.key.toLowerCase()
   );
+}
+
+/** Runs every contributor, keeps the non-empty groups and puts separators between them. */
+function collectMenuItems<T extends Owned>(contributors: T[], items: (c: T) => MenuEntry[]): MenuEntry[] {
+  const out: MenuEntry[] = [];
+  for (const c of contributors) {
+    let group: MenuEntry[];
+    try {
+      group = items(c);
+    } catch (e) {
+      // A broken plugin must not take the whole context menu down with it.
+      console.error(`Menu items of "${c.pluginId}" failed`, e);
+      continue;
+    }
+    if (!group.length) continue;
+    if (out.length) out.push("separator");
+    out.push(...group);
+  }
+  return out;
 }
 
 /** Text for a hotkey, e.g. "Ctrl+Shift+Tab". */
