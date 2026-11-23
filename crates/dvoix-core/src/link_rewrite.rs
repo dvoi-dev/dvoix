@@ -90,7 +90,9 @@ fn rel_path(from_dir: &str, to_path: &str) -> String {
     let from_parts: Vec<&str> = from_dir.split('/').filter(|p| !p.is_empty()).collect();
     let to_parts: Vec<&str> = to_path.split('/').filter(|p| !p.is_empty()).collect();
     let mut common = 0;
-    while common < from_parts.len() && common < to_parts.len() && from_parts[common] == to_parts[common]
+    while common < from_parts.len()
+        && common < to_parts.len()
+        && from_parts[common] == to_parts[common]
     {
         common += 1;
     }
@@ -278,8 +280,6 @@ fn collect_skips(content: &str, base: usize) -> Vec<(usize, usize)> {
 /// after the move, the alias map of the index and the moves themselves, and
 /// answers per note what its links have to say afterwards.
 pub struct LinkRewriter {
-    /// Every file path after the move, as written.
-    files: Vec<String>,
     /// Old path -> new path, lower-cased keys.
     moved: HashMap<String, String>,
     /// New path -> old path, lower-cased keys.
@@ -315,7 +315,10 @@ impl LinkRewriter {
         let mut old_paths: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         for f in files {
-            let old = rev.get(&f.to_lowercase()).cloned().unwrap_or_else(|| f.clone());
+            let old = rev
+                .get(&f.to_lowercase())
+                .cloned()
+                .unwrap_or_else(|| f.clone());
             if seen.insert(old.to_lowercase()) {
                 old_paths.push(old);
             }
@@ -338,17 +341,12 @@ impl LinkRewriter {
         let mut base_count: HashMap<String, usize> = HashMap::new();
         let mut md_stem_count: HashMap<String, usize> = HashMap::new();
         for f in files {
-            *base_count
-                .entry(base_name(f).to_lowercase())
-                .or_insert(0) += 1;
+            *base_count.entry(base_name(f).to_lowercase()).or_insert(0) += 1;
             if f.to_lowercase().ends_with(".md") {
-                *md_stem_count
-                    .entry(stem_of(f).to_lowercase())
-                    .or_insert(0) += 1;
+                *md_stem_count.entry(stem_of(f).to_lowercase()).or_insert(0) += 1;
             }
         }
         Self {
-            files: files.to_vec(),
             moved,
             rev,
             old_by_key,
@@ -413,8 +411,8 @@ impl LinkRewriter {
         // A bare target: keep it bare while the name stays unambiguous.
         let base = base_name(new_path);
         let stem = stem_of(new_path);
-        let base_style = tl == base.to_lowercase()
-            || (tl != stem.to_lowercase() && tl.contains('.'));
+        let base_style =
+            tl == base.to_lowercase() || (tl != stem.to_lowercase() && tl.contains('.'));
         let cand = if base_style { base } else { stem };
         let cl = cand.to_lowercase();
         if cl == tl && self.name_free(&cl, base_style, new_path) {
@@ -532,10 +530,7 @@ impl LinkRewriter {
             wiki_regions.push((open, close + 2));
             // The target part ends at the first '|' (alias) or '#' (heading
             // or block ref); only it can be replaced.
-            let t_end = inner
-                .find(['|', '#'])
-                .map(|k| inner_s + k)
-                .unwrap_or(close);
+            let t_end = inner.find(['|', '#']).map(|k| inner_s + k).unwrap_or(close);
             let raw = &content[inner_s..t_end];
             let trimmed = raw.trim();
             let ts = inner_s + (raw.len() - raw.trim_start().len());
@@ -659,5 +654,171 @@ fn encode(text: &str) -> String {
         text.replace(' ', "%20")
     } else {
         text.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn aliases_empty() -> HashMap<String, Vec<String>> {
+        HashMap::new()
+    }
+
+    fn rewrite(
+        files: &[&str],
+        moves: &[(&str, &str)],
+        aliases: &HashMap<String, Vec<String>>,
+        source: &str,
+        content: &str,
+    ) -> Option<String> {
+        let files: Vec<String> = files.iter().map(|s| s.to_string()).collect();
+        let moves: Vec<Move> = moves
+            .iter()
+            .map(|(from, to)| Move {
+                from: from.to_string(),
+                to: to.to_string(),
+            })
+            .collect();
+        LinkRewriter::new(&files, aliases, &moves).rewrite(source, content)
+    }
+
+    #[test]
+    fn renames_a_bare_wikilink_to_the_new_stem() {
+        let out = rewrite(
+            &["notes/renamed.md", "notes/beta.md"],
+            &[("notes/alpha.md", "notes/renamed.md")],
+            &aliases_empty(),
+            "notes/beta.md",
+            "See [[alpha]] for details.",
+        );
+        assert_eq!(out.as_deref(), Some("See [[renamed]] for details."));
+    }
+
+    #[test]
+    fn keeps_heading_and_alias_parts_of_a_wikilink() {
+        let out = rewrite(
+            &["notes/renamed.md", "notes/beta.md"],
+            &[("notes/alpha.md", "notes/renamed.md")],
+            &aliases_empty(),
+            "notes/beta.md",
+            "- [[alpha#Goals|the goals]]\n- [[alpha|alias]]\n",
+        );
+        assert_eq!(
+            out.as_deref(),
+            Some("- [[renamed#Goals|the goals]]\n- [[renamed|alias]]\n")
+        );
+    }
+
+    #[test]
+    fn leaves_untouched_notes_alone() {
+        // The note itself and the target both stay put: nothing to rewrite.
+        let out = rewrite(
+            &["notes/alpha.md", "notes/beta.md"],
+            &[],
+            &aliases_empty(),
+            "notes/beta.md",
+            "See [[alpha]].",
+        );
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn a_folder_move_keeps_bare_names_but_updates_path_targets() {
+        let files = ["archive/notes/alpha.md", "archive/notes/beta.md", "root.md"];
+        let moves = [
+            ("notes/alpha.md", "archive/notes/alpha.md"),
+            ("notes/beta.md", "archive/notes/beta.md"),
+        ];
+        let content = "bare [[alpha]] and path [[notes/beta]]\n";
+
+        let out = rewrite(
+            &files,
+            &moves,
+            &aliases_empty(),
+            "archive/notes/beta.md",
+            content,
+        );
+        // The bare name still resolves uniquely, so it is kept as written.
+        assert!(out.is_some());
+        let out = out.unwrap();
+        assert!(out.starts_with("bare [[alpha]] and path "), "{out}");
+    }
+
+    #[test]
+    fn a_name_collision_falls_back_to_the_full_path() {
+        // After the move there is a second `alpha` in another folder, so a
+        // bare name is ambiguous and the link has to use the path.
+        let files = ["notes/renamed.md", "other/renamed.md"];
+        let out = rewrite(
+            &files,
+            &[("notes/alpha.md", "notes/renamed.md")],
+            &aliases_empty(),
+            "notes/other.md",
+            "See [[alpha]].\n",
+        );
+        assert_eq!(out.as_deref(), Some("See [[notes/renamed]].\n"));
+    }
+
+    #[test]
+    fn rewrites_markdown_links_including_angle_brackets_and_extension() {
+        let out = rewrite(
+            &["notes/renamed.md", "notes/beta.md"],
+            &[("notes/alpha.md", "notes/renamed.md")],
+            &aliases_empty(),
+            "notes/beta.md",
+            "A [link](alpha.md) and another [x](notes/alpha.md)\n",
+        );
+        let out = out.unwrap();
+        assert!(
+            out.contains("(notes/renamed.md)") || out.contains("(renamed.md)"),
+            "{out}"
+        );
+        assert!(!out.contains("(alpha.md)"), "{out}");
+    }
+
+    #[test]
+    fn never_rewrites_inside_code_blocks_or_inline_code() {
+        let content = "Inline `[[alpha]]` stays.\n\n```\n[[alpha]]\n```\n\nReal [[alpha]].\n";
+        let out = rewrite(
+            &["notes/renamed.md", "notes/beta.md"],
+            &[("notes/alpha.md", "notes/renamed.md")],
+            &aliases_empty(),
+            "notes/beta.md",
+            content,
+        )
+        .unwrap();
+        assert!(out.contains("`[[alpha]]` stays."), "{out}");
+        assert!(out.contains("```\n[[alpha]]\n```"), "{out}");
+        assert!(out.contains("Real [[renamed]]."), "{out}");
+    }
+
+    #[test]
+    fn frontmatter_is_never_rewritten() {
+        let content = "---\ntitle: [[alpha]]\n---\n\nBody [[alpha]].\n";
+        let out = rewrite(
+            &["notes/renamed.md", "notes/beta.md"],
+            &[("notes/alpha.md", "notes/renamed.md")],
+            &aliases_empty(),
+            "notes/beta.md",
+            content,
+        )
+        .unwrap();
+        assert!(out.starts_with("---\ntitle: [[alpha]]\n---"), "{out}");
+        assert!(out.ends_with("Body [[renamed]].\n"), "{out}");
+    }
+
+    #[test]
+    fn everything_outside_the_target_span_stays_byte_identical() {
+        let content = "# Title\r\n\r\n- item [[alpha]]  \r\n";
+        let out = rewrite(
+            &["notes/renamed.md", "notes/beta.md"],
+            &[("notes/alpha.md", "notes/renamed.md")],
+            &aliases_empty(),
+            "notes/beta.md",
+            content,
+        )
+        .unwrap();
+        assert_eq!(out, "# Title\r\n\r\n- item [[renamed]]  \r\n");
     }
 }

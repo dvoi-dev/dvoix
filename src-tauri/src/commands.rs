@@ -7,7 +7,10 @@
 
 use dvoix_core::{
     GraphData, HiddenFilter, NoteAliases, NoteSummary, RenderedNote, SearchHit, TaskItem,
-    TrashedEntry, VaultEntry, index::TagCount, link_rewrite::{LinkRewriter, Move}, markdown, tasks,
+    TrashedEntry, VaultEntry,
+    index::TagCount,
+    link_rewrite::{LinkRewriter, Move},
+    markdown, tasks,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
@@ -281,7 +284,12 @@ pub fn rename_with_links(
             .into_iter()
             .map(|e| e.path)
             .collect();
-        let aliases = ws.index.lock().map_err(err)?.aliases_by_lower().map_err(err)?;
+        let aliases = ws
+            .index
+            .lock()
+            .map_err(err)?
+            .aliases_by_lower()
+            .map_err(err)?;
         let rewriter = LinkRewriter::new(&files, &aliases, &moves);
         let mut updated_files = Vec::new();
         for old_path in candidates {

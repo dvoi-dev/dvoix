@@ -280,8 +280,8 @@ fn section_start(body: &str, range: &std::ops::Range<usize>) -> usize {
     let before = &body[..range.start];
     let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
     let line = body[line_start..range.start].trim_end_matches(['\r', '\n']);
-    let setext = !line.is_empty()
-        && (line.bytes().all(|b| b == b'=') || line.bytes().all(|b| b == b'-'));
+    let setext =
+        !line.is_empty() && (line.bytes().all(|b| b == b'=') || line.bytes().all(|b| b == b'-'));
     if setext {
         before[..line_start].rfind('\n').map(|i| i + 1).unwrap_or(0)
     } else {
@@ -583,11 +583,18 @@ mod tests {
         let n = parse("---\nalias: Legacy Name\n---\nbody", "file");
         assert_eq!(n.aliases, ["Legacy Name"]);
 
-        let n = parse("---\naliases: [Same]\nalias: same, Other\n---\nbody", "file");
+        let n = parse(
+            "---\naliases: [Same]\nalias: same, Other\n---\nbody",
+            "file",
+        );
         assert_eq!(n.aliases, ["Same", "Other"]);
 
         assert!(parse("# No frontmatter", "file").aliases.is_empty());
-        assert!(parse("---\naliases: 42\n---\nbody", "file").aliases.is_empty());
+        assert!(
+            parse("---\naliases: 42\n---\nbody", "file")
+                .aliases
+                .is_empty()
+        );
     }
 
     #[test]
@@ -725,9 +732,15 @@ mod tests {
     fn extracts_setext_sections_and_the_first_of_repeated_headings() {
         // A setext heading with `-` is level 2; the next `##` ends its section.
         let body = "Goals\n-----\n\nfirst\n\n## Goals\n\nsecond\n";
-        assert_eq!(extract_section(body, "Goals"), Some("Goals\n-----\n\nfirst\n\n"));
+        assert_eq!(
+            extract_section(body, "Goals"),
+            Some("Goals\n-----\n\nfirst\n\n")
+        );
         let body = "## Notes\n\nfirst\n\n## Notes\n\nsecond\n";
-        assert_eq!(extract_section(body, "Notes"), Some("## Notes\n\nfirst\n\n"));
+        assert_eq!(
+            extract_section(body, "Notes"),
+            Some("## Notes\n\nfirst\n\n")
+        );
     }
 
     #[test]

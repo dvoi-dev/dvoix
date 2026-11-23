@@ -839,7 +839,11 @@ impl Index {
                 "SELECT path FROM notes WHERE path LIKE ?1 ESCAPE '\\' AND substr(path, 1, ?2) = ?3",
             )?;
             let rows = stmt.query_map(
-                params![prefix_pattern(&prefix), prefix.chars().count() as i64, prefix],
+                params![
+                    prefix_pattern(&prefix),
+                    prefix.chars().count() as i64,
+                    prefix
+                ],
                 |r| r.get::<_, String>(0),
             )?;
             for row in rows {
