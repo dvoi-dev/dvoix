@@ -18,6 +18,8 @@ pub enum Error {
     StaleTask(String),
     #[error("The file changed on disk: {0}")]
     Conflict(String),
+    #[error("invalid regular expression: {0}")]
+    InvalidRegex(String),
     #[error("Git error: {0}")]
     Git(String),
     #[error("Plugin error: {0}")]

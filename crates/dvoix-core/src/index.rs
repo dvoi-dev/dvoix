@@ -698,6 +698,18 @@ impl Index {
         Ok(hits)
     }
 
+    /// Every note path in the index, in path order. A replace has to look at
+    /// all of them: FTS matches word prefixes only, so its hits are no
+    /// candidate list for every substring, a regular expression or the
+    /// frontmatter (which the search table does not hold).
+    pub fn note_paths(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT path FROM notes ORDER BY path")?;
+        let paths = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(paths)
+    }
+
     pub fn tags(&self) -> Result<Vec<TagCount>> {
         let mut stmt = self
             .conn

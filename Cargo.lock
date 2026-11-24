@@ -745,6 +745,7 @@ version = "0.2.0"
 dependencies = [
  "notify",
  "pulldown-cmark",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

@@ -31,6 +31,31 @@ export interface SearchHit {
   snippet: string;
 }
 
+/** Options of a vault-wide replace, the same as the in-note replace. */
+export interface ReplaceOptions {
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  regex: boolean;
+}
+
+/** One note a replace changed, with the text from before for an undo. */
+export interface ReplacedFile {
+  path: string;
+  previousContent: string;
+  /** The disk state after the write; the base of a checked undo write. */
+  entry: VaultEntry;
+}
+
+/** What a replace preview or run found (see `dvoix_core::replace`). */
+export interface ReplaceOutcome {
+  /** Notes with at least one match. */
+  paths: string[];
+  /** How many occurrences were (or would be) replaced. */
+  replacements: number;
+  /** The rewritten notes; empty for a preview. */
+  files: ReplacedFile[];
+}
+
 /** A file's text with the disk state it was read at (see `dvoix_core::vault::FileRead`). */
 export interface FileRead {
   content: string;
@@ -240,6 +265,17 @@ export const api = {
   emptyTrash: () => invoke<void>("empty_trash"),
   listSnippets: () => invoke<string[]>("list_snippets"),
   search: (query: string) => invoke<SearchHit[]>("search", { query }),
+  /**
+   * Replaces text in every note, or only in `paths`. With `dryRun` nothing is
+   * written; the answer names the notes and counts the matches.
+   */
+  replaceInVault: (
+    query: string,
+    replacement: string,
+    options: ReplaceOptions,
+    paths: string[] | null = null,
+    dryRun = false,
+  ) => invoke<ReplaceOutcome>("replace_in_vault", { query, replacement, options, paths, dryRun }),
   tags: () => invoke<TagCount[]>("tags"),
   notesWithTag: (tag: string) => invoke<NoteSummary[]>("notes_with_tag", { tag }),
   notesWhere: (key: string, value: string) => invoke<NoteSummary[]>("notes_where", { key, value }),

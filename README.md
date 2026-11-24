@@ -17,6 +17,7 @@ A desktop app for notes, project management, tracking, and whatever comes later.
 - Quick switcher (Ctrl/Cmd + O) with fuzzy search over all files: `mtg plan` finds `Projects/Meeting-Planning`. Enter opens, Ctrl + Enter opens in a new tab, and if the note does not exist it is created
 - Command palette (Ctrl/Cmd + P): fuzzy search over every registered command, including commands without a shortcut, with the plugin name and the effective shortcut. Unavailable commands are dimmed
 - Find and replace in the open note (Ctrl/Cmd + F / Ctrl/Cmd + H): match case, regular expressions, whole words, replace next or all. In the reading view it switches to the editing view first
+- Replace across the vault from the search panel: the same options as in the open note (match case, whole word, regular expression), a preview with the number of matches and affected notes before anything is written, and an undo toast afterwards. Only the matched text changes; line endings, comments and tables stay as they were. Open notes with unsaved edits are saved first, and the replace stops if a save is blocked by a conflict
 - Keyboard shortcuts: Ctrl + T new tab, Ctrl + W close tab, Ctrl + Tab / Ctrl + Shift + Tab (or Ctrl + Page Down/Up) switch tabs, Ctrl + \ split right, Alt + Left / Alt + Right (or the Back / Forward buttons) navigate history, Ctrl + ] show/hide the right sidebar, Ctrl + Shift + F full-text search, Ctrl + Shift + I insert template, Ctrl + Shift + D open today's daily note, Ctrl + Alt + Left/Right previous/next daily note, Ctrl + Shift + B bookmark the open note, Ctrl + Enter commit changes, Ctrl + Shift + H open history, Ctrl + , settings. Every command shortcut can be rebound under Settings → Keyboard shortcuts; conflicts are shown before a binding is replaced
 - Clickable folder breadcrumbs in the file header reveal the parent folder in the explorer
 - Markdown editor (CodeMirror 6) with YAML frontmatter, `[[wikilinks]]` (Ctrl/Cmd + click opens or creates the note) and `#tags`
@@ -44,14 +45,14 @@ A desktop app for notes, project management, tracking, and whatever comes later.
 - Settings: editor (line length, line numbers, spellcheck), appearance (themes: Dark, Midnight, Slate, Light; preset or custom hex accent colors; editor and interface fonts; font size sliders; CSS snippets from `.dvoix/snippets/`), rebindable keyboard shortcuts with conflict handling, and separate options per feature or plugin
 - All settings of a vault live inside the vault under `.dvoix/` (see below), so they move along when you copy or sync the folder
 - Official plugins in the plugin store: [dvoix-projects](https://github.com/dvoi-dev/dvoix-projects), [dvoix-git](https://github.com/dvoi-dev/dvoix-git), [dvoix-kanban](https://github.com/dvoi-dev/dvoix-kanban) (`.kboard`) and [dvoix-crew](https://github.com/dvoi-dev/dvoix-crew)
-- First custom file type: `.canvas` in the open [JSON Canvas format](https://jsoncanvas.org) (move cards, double-click creates a card)
+- First custom file type: `.canvas` in the open [JSON Canvas format](https://jsoncanvas.org): move cards, double-click creates a card, drag from a card's border dot onto another card to connect them. Right-click an edge to edit its label, its color, the arrows at either end or to delete it; `fromSide`/`toSide`, labels and colors are written back to the same file
 
 ## Tech stack
 
 | Layer | Technology |
 | --- | --- |
 | App shell | [Tauri 2](https://v2.tauri.app), `ureq` (downloads for the plugin store) |
-| Core (Rust) | `notify` (file watcher), `pulldown-cmark` + `serde_yaml_ng` (Markdown & frontmatter), `rusqlite` with FTS5 (index & search) |
+| Core (Rust) | `notify` (file watcher), `pulldown-cmark` + `serde_yaml_ng` (Markdown & frontmatter), `regex` (search and replace), `rusqlite` with FTS5 (index & search) |
 | Frontend | Svelte 5, TypeScript, Vite, Tailwind CSS 4, [force-graph](https://github.com/vasturiano/force-graph) (graph view on canvas) |
 | Editor | CodeMirror 6 |
 
@@ -62,6 +63,7 @@ crates/dvoix-core/      Rust core without Tauri, testable on its own
   src/vault.rs          reading/writing in the vault, paths always relative and checked
   src/markdown.rs       frontmatter, title, tags, links, headings, search text, HTML for the reading view
   src/tasks.rs          read and toggle checkbox tasks
+  src/replace.rs        search and replace across notes, with the options of the in-note replace
   src/store.rs          plugin store: plugin list, manifest.json, checksums, release notes, installing into .dvoix/plugins/
   src/index.rs          SQLite index in <vault>/.dvoix/index.sqlite (cache only)
   src/watcher.rs        reports changes on disk

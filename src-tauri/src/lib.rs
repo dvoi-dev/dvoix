@@ -159,6 +159,7 @@ pub fn run() {
             commands::empty_trash,
             commands::list_snippets,
             commands::search,
+            commands::replace_in_vault,
             commands::tags,
             commands::notes_with_tag,
             commands::notes_where,
