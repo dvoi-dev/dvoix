@@ -1,0 +1,4 @@
+# GitHub serves the plugin files as they are stored (LF). Windows checkouts
+# must keep those bytes too: the example registry pins their SHA-256, and a
+# CRLF checkout would change every checksum.
+* text=auto eol=lf

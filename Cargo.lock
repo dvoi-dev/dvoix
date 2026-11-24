@@ -747,6 +747,7 @@ dependencies = [
  "pulldown-cmark",
  "regex",
  "rusqlite",
+ "same-file",
  "serde",
  "serde_json",
  "serde_yaml_ng",

@@ -458,7 +458,10 @@ impl Vault {
     pub fn rename(&self, from: &str, to: &str) -> Result<VaultEntry> {
         let src = self.resolve(from)?;
         let dst = self.resolve(to)?;
-        if dst.exists() {
+        // A case-only rename on a case-insensitive file system (macOS,
+        // Windows) points at the same entry: refusing it as "already exists"
+        // would make `projects` -> `Projects` impossible there.
+        if dst.exists() && !same_file::is_same_file(&src, &dst).unwrap_or(false) {
             return Err(Error::AlreadyExists(to.to_string()));
         }
         if let Some(parent) = dst.parent() {
@@ -823,6 +826,19 @@ mod tests {
         vault.trash("projects/inbox.md").unwrap();
         assert!(vault.read("projects/inbox.md").is_err());
         assert!(dir.path().join(TRASH_DIR).join("inbox.md").exists());
+    }
+
+    /// Renaming only the case must work on a case-sensitive and a
+    /// case-insensitive file system alike (the app runs on both).
+    #[test]
+    fn a_case_only_rename_is_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        vault.write("projects/alpha.md", "# Alpha").unwrap();
+
+        vault.rename("projects", "Projects").unwrap();
+
+        assert_eq!(vault.read("Projects/alpha.md").unwrap(), "# Alpha");
     }
 
     #[test]

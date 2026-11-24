@@ -1373,6 +1373,20 @@ fn fts_query(input: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Whether the file system of the vault tells names apart by case. macOS
+    /// and Windows usually do not, and there two siblings that differ only in
+    /// case cannot exist, so tests that need them skip on such a system.
+    fn case_sensitive(vault: &Vault) -> bool {
+        let upper = vault.root().join("CaseTest");
+        let lower = vault.root().join("casetest");
+        if std::fs::write(&upper, "").is_err() {
+            return false;
+        }
+        let sensitive = !lower.exists();
+        let _ = std::fs::remove_file(&upper);
+        sensitive
+    }
+
     fn sample_vault() -> (tempfile::TempDir, Vault) {
         let dir = tempfile::tempdir().unwrap();
         let vault = Vault::open(dir.path()).unwrap();
@@ -2587,6 +2601,10 @@ mod tests {
     #[test]
     fn a_folder_rename_leaves_a_case_sibling_alone() {
         let (_dir, vault) = sample_vault();
+        if !case_sensitive(&vault) {
+            eprintln!("skipped: the file system is case-insensitive");
+            return;
+        }
         vault
             .write("Projects/upper.md", "# Upper\nAn upperuniq note.")
             .unwrap();
@@ -2621,6 +2639,10 @@ mod tests {
     #[test]
     fn a_case_only_rename_with_a_case_sibling_moves_only_its_own_rows() {
         let (_dir, vault) = sample_vault();
+        if !case_sensitive(&vault) {
+            eprintln!("skipped: the file system is case-insensitive");
+            return;
+        }
         vault
             .write("work/other.md", "# Other\nA loweruniq note.")
             .unwrap();
