@@ -1284,6 +1284,15 @@ class VaultStore {
     return Object.entries(this.buffers).some(([path, buffer]) => buffer.dirty && match(path));
   }
 
+  /**
+   * Whether any buffer still has unsaved edits. A bulk operation calls
+   * `flush` first and blocks here when a save was refused (conflict), so no
+   * file is rewritten under an open editor with pending changes.
+   */
+  hasUnsavedChanges(match: (path: string) => boolean = () => true): boolean {
+    return this.hasDirty(match);
+  }
+
   private discardBuffer(path: string) {
     clearTimeout(this.saveTimers.get(path));
     this.saveTimers.delete(path);

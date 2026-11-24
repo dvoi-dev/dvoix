@@ -8,7 +8,7 @@
 use dvoix_core::{
     FileRead, GraphData, HiddenFilter, NoteAliases, NoteSummary, RenderedNote, SearchHit, TaskItem,
     TrashedEntry, VaultEntry,
-    index::TagCount,
+    index::{self, TagCount},
     link_rewrite::{LinkRewriter, Move},
     markdown, tasks,
 };
@@ -466,6 +466,49 @@ pub fn search(state: State<AppState>, query: String) -> CmdResult<Vec<SearchHit>
             .map_err(err)?
             .search(&query, 50)
             .map_err(err)
+    })
+}
+
+/// Replaces text in every note of the vault, or only in `paths` (one note of
+/// the result list). The options are those of the in-note replace: match case,
+/// whole word, regular expression. With `dry_run` nothing is written; the
+/// answer only names the notes and counts the matches, so the UI can ask
+/// before replacing.
+#[tauri::command(async)]
+pub fn replace_in_vault(
+    state: State<AppState>,
+    query: String,
+    replacement: String,
+    options: dvoix_core::ReplaceOptions,
+    paths: Option<Vec<String>>,
+    dry_run: bool,
+) -> CmdResult<dvoix_core::ReplaceOutcome> {
+    with_ws(&state, |ws| {
+        let mut index = ws.index.lock().map_err(err)?;
+        let candidates = match paths {
+            // Only notes: replacing in a canvas or another structured file
+            // would corrupt it.
+            Some(paths) => paths
+                .into_iter()
+                .filter(|path| index::is_indexable(path))
+                .collect(),
+            None => index.note_paths().map_err(err)?,
+        };
+        let outcome = dvoix_core::replace_in_vault(
+            &ws.vault,
+            &candidates,
+            &query,
+            &replacement,
+            options,
+            dry_run,
+        )
+        .map_err(err)?;
+        if !dry_run {
+            for file in &outcome.files {
+                index.update(&ws.vault, &file.path).map_err(err)?;
+            }
+        }
+        Ok(outcome)
     })
 }
 

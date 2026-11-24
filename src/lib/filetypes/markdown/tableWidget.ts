@@ -392,7 +392,8 @@ class TableEditor {
       table.rows[r].cells.every((cell, c) => cell.text === old.rows[r].cells[c]?.text);
     // The old body rows that can be kept, by the row they were drawn for.
     const oldBody = new Map<number, { tr: HTMLTableRowElement; cells: HTMLElement[]; grip: HTMLElement }>();
-    [...tbody.rows].forEach((tr, i) => {
+    // `rows` is not iterable in every DOM implementation (happy-dom in the tests).
+    [...tbody.querySelectorAll("tr")].forEach((tr, i) => {
       const r = i + 1;
       if (sameRow(r)) oldBody.set(r, { tr, cells: this.cells[r], grip: this.rowGrips[r] });
     });
